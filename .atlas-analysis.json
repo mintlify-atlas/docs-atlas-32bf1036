@@ -1,0 +1,152 @@
+{
+  "projectType": "saas",
+  "projectName": "ShelfWise",
+  "projectDescription": "A full-featured multi-tenant inventory management system with POS, e-commerce, payroll, and supplier management capabilities.",
+  "theme": "maple",
+  "primaryColor": "#3b82f6",
+  "lightColor": "#93c5fd",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Getting Started",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Setup",
+            "pages": [
+              "setup/installation",
+              "setup/configuration",
+              "setup/multi-tenancy"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Core Features",
+        "groups": [
+          {
+            "group": "Inventory Management",
+            "pages": [
+              "features/inventory/products",
+              "features/inventory/stock-movements",
+              "features/inventory/stock-take",
+              "features/inventory/reorder-alerts"
+            ]
+          },
+          {
+            "group": "Sales & POS",
+            "pages": [
+              "features/sales/point-of-sale",
+              "features/sales/orders",
+              "features/sales/returns",
+              "features/sales/receipts"
+            ]
+          },
+          {
+            "group": "E-Commerce",
+            "pages": [
+              "features/ecommerce/storefront",
+              "features/ecommerce/customers",
+              "features/ecommerce/payments"
+            ]
+          },
+          {
+            "group": "Purchasing",
+            "pages": [
+              "features/purchasing/suppliers",
+              "features/purchasing/purchase-orders",
+              "features/purchasing/catalog"
+            ]
+          },
+          {
+            "group": "Payroll",
+            "pages": [
+              "features/payroll/overview",
+              "features/payroll/pay-runs",
+              "features/payroll/wage-advances",
+              "features/payroll/deductions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Backend",
+            "pages": [
+              "architecture/service-layer",
+              "architecture/multi-tenancy",
+              "architecture/authorization",
+              "architecture/database-schema"
+            ]
+          },
+          {
+            "group": "Frontend",
+            "pages": [
+              "architecture/inertia-react",
+              "architecture/components",
+              "architecture/routing",
+              "architecture/state-management"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Development",
+        "groups": [
+          {
+            "group": "Guidelines",
+            "pages": [
+              "development/conventions",
+              "development/testing",
+              "development/security"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "api/services",
+              "api/models",
+              "api/enums",
+              "api/policies"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-tenant SaaS architecture with role-based access control",
+    "Comprehensive inventory management with stock tracking and movements",
+    "Point of Sale (POS) system with barcode scanning and receipt printing",
+    "E-commerce storefront with payment gateway integration",
+    "Full payroll system with tax calculation and NIBSS export",
+    "Supplier management with catalog and purchase orders",
+    "Multi-shop support with individual currency and VAT settings",
+    "Service booking alongside product sales",
+    "Customer credit management and loyalty tracking",
+    "Real-time notifications and approval workflows"
+  ],
+  "publicApiSurface": [
+    "ProductService - Product and variant management",
+    "OrderService - Order processing and fulfillment",
+    "POSService - Point of sale operations",
+    "StockMovementService - Inventory tracking and adjustments",
+    "PayrollService - Employee payroll processing",
+    "CustomerService - Customer and credit management",
+    "SupplierService - Supplier catalog and connections",
+    "CheckoutService - E-commerce checkout flow",
+    "PaymentGateway - Payment processing integration",
+    "NotificationService - Multi-channel notifications",
+    "ApprovalService - Workflow approvals",
+    "ReportService - Analytics and reporting"
+  ]
+}
