@@ -721,6 +721,71 @@ $cart = $cartService->mergeGuestCartIntoCustomerCart(
     - `calculatePension()` - Pension contributions
     - `calculateVAT()` - Value Added Tax
   </Tab>
+  
+  <Tab title="CheckoutService">
+    **Location**: `app/Services/CheckoutService.php`
+    
+    Handles e-commerce checkout flow from cart to order creation.
+    
+    ### Key Methods
+    
+    - `createOrderFromCart()` - Convert cart to order with stock validation
+    - Stock validation and reservation
+    - Payment method handling
+    - Address management
+  </Tab>
+  
+  <Tab title="NotificationService">
+    **Location**: `app/Services/NotificationService.php`
+    
+    Manages multi-channel notifications for users and roles.
+    
+    ### Key Methods
+    
+    - `createForUser()` - Notify specific user
+    - `createForRole()` - Notify all users with minimum role level
+    - `markAsRead()` - Mark notification as read
+    - `getUnreadCount()` - Get unread notification count
+  </Tab>
+  
+  <Tab title="ApprovalService">
+    **Location**: `app/Services/ApprovalService.php`
+    
+    Manages approval workflows for high-value transactions.
+    
+    ### Key Methods
+    
+    - `createApprovalRequest()` - Create approval request for entity
+    - `approve()` - Approve current step
+    - `reject()` - Reject approval request
+    - `findApplicableChain()` - Find approval chain by amount threshold
+  </Tab>
+  
+  <Tab title="SupplierService">
+    **Location**: `app/Services/SupplierService.php`
+    
+    Manages supplier connections, catalogs, and purchase orders.
+    
+    ### Key Methods
+    
+    - Supplier connection management
+    - Catalog visibility control
+    - Purchase order creation
+    - Pricing tier management
+  </Tab>
+  
+  <Tab title="PaymentGateway">
+    **Location**: `app/Services/Payment/PaymentGatewayManager.php`
+    
+    Handles payment processing through multiple gateways (Paystack, etc.).
+    
+    ### Key Methods
+    
+    - `initializePayment()` - Start payment process
+    - `verifyPayment()` - Verify payment status
+    - `handleWebhook()` - Process payment webhooks
+    - `getGateway()` - Get specific gateway instance
+  </Tab>
 </Tabs>
 
 ---
