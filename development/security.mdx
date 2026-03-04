@@ -1,0 +1,551 @@
+---
+title: Security Requirements
+description: Security standards, authorization patterns, and best practices for ShelfWise
+---
+
+## Authorization Architecture
+
+ShelfWise uses **Policy-Based Authorization** with Laravel Policies.
+
+### Authorization Flow
+
+<Steps>
+  <Step title="Form Request Validation">
+    Form Requests validate input but delegate authorization to Policies
+    
+    ```php
+    public function authorize(): bool
+    {
+        return $this->user()->can('create', \App\Models\Product::class);
+    }
+    ```
+  </Step>
+  
+  <Step title="Controller Authorization">
+    Controllers use `Gate::authorize()` before service calls
+    
+    ```php
+    public function store(StoreProductRequest $request)
+    {
+        Gate::authorize('create', Product::class);
+        $product = $this->productService->createProduct($request->validated());
+        return redirect()->route('products.index');
+    }
+    ```
+  </Step>
+  
+  <Step title="Policy Checks">
+    Policies contain all authorization logic with tenant isolation
+    
+    ```php
+    public function view(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+        
+        return $user->role->hasPermission('manage_inventory');
+    }
+    ```
+  </Step>
+</Steps>
+
+### Policy Pattern
+
+<Accordion title="Complete Policy Example">
+```php app/Policies/ProductPolicy.php
+namespace App\Policies;
+
+use App\Enums\UserRole;
+use App\Models\Product;
+use App\Models\User;
+
+class ProductPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return $user->role->hasPermission('manage_inventory');
+    }
+
+    public function create(User $user): bool
+    {
+        return $user->role->hasPermission('manage_inventory');
+    }
+
+    public function view(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+            return true;
+        }
+
+        return $user->shops()->where('shops.id', $product->shop_id)->exists();
+    }
+
+    public function update(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+            return true;
+        }
+
+        return $user->shops()->where('shops.id', $product->shop_id)->exists();
+    }
+
+    public function delete(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        return $user->role->value === UserRole::OWNER->value ||
+               $user->role->value === UserRole::GENERAL_MANAGER->value;
+    }
+
+    public function restore(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        return $user->is_tenant_owner ||
+               $user->role->value === UserRole::GENERAL_MANAGER->value;
+    }
+
+    public function forceDelete(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        return $user->is_tenant_owner;
+    }
+}
+```
+</Accordion>
+
+<Warning>
+  **Every policy method MUST check tenant isolation first:**
+  
+  ```php
+  if ($user->tenant_id !== $model->tenant_id) {
+      return false;
+  }
+  ```
+</Warning>
+
+## Role-Based Access Control
+
+### Role Hierarchy
+
+```
+Super Admin (999) - Full system access
+  |
+  └─ Owner (100) - Full tenant access
+       |
+       └─ General Manager (80) - Manage all shops
+            |
+            └─ Store Manager (60) - Manage assigned shop
+                 |
+                 ├─ Assistant Manager (50) - Limited shop management
+                 ├─ Sales Rep (40) - Sales and customer management
+                 ├─ Inventory Clerk (30) - Stock management
+                 └─ Cashier (30) - POS operations only
+```
+
+### Permission Checks
+
+```php
+// Role-based permission
+if ($user->role->hasPermission('manage_inventory')) {
+    // Allow access
+}
+
+// Direct role check
+if ($user->role->value === UserRole::OWNER->value) {
+    // Owner-only action
+}
+
+// Multiple roles
+if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+    // Senior management action
+}
+```
+
+## Multi-Tenancy Security
+
+### Tenant Isolation (CRITICAL)
+
+<Warning>
+  **Every database query MUST filter by `tenant_id`**. Failure to do so is a critical security vulnerability.
+</Warning>
+
+```php
+// ✅ Correct - Explicitly scoped to tenant
+Product::query()->where('tenant_id', auth()->user()->tenant_id)->get();
+
+// ✅ Correct - Service handles scoping
+app(ProductService::class)->getAllProducts();
+
+// ❌ CRITICAL ERROR - No tenant isolation
+Product::query()->get();
+```
+
+### Validation with Tenant Scope
+
+**Uniqueness checks MUST be scoped to tenant:**
+
+```php app/Http/Requests/CreateProductRequest.php
+public function rules(): array
+{
+    $tenantId = $this->user()->tenant_id;
+
+    return [
+        'sku' => [
+            'required',
+            'string',
+            Rule::unique('product_variants', 'sku')
+                ->where(fn ($query) => $query->whereExists(
+                    fn ($q) => $q->select(\DB::raw(1))
+                        ->from('products')
+                        ->whereColumn('products.id', 'product_variants.product_id')
+                        ->where('products.tenant_id', $tenantId)
+                )),
+        ],
+    ];
+}
+```
+
+### Relationship Checks
+
+**Verify tenant ownership of related records:**
+
+```php
+$shop = Shop::query()
+    ->where('id', $request->shop_id)
+    ->where('tenant_id', auth()->user()->tenant_id)
+    ->firstOrFail();
+```
+
+## Input Validation
+
+### Form Request Validation
+
+**All inputs MUST be validated via Form Requests:**
+
+```php
+class StoreProductRequest extends FormRequest
+{
+    public function rules(): array
+    {
+        return [
+            'name' => ['required', 'string', 'max:255'],
+            'price' => ['required', 'numeric', 'min:0'],
+            'description' => ['nullable', 'string'],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' => 'Please provide a name for this product.',
+            'price.required' => 'Please enter the selling price.',
+            'price.min' => 'Selling price cannot be negative.',
+        ];
+    }
+}
+```
+
+### Mass Assignment Protection
+
+**Use `$fillable` or `$guarded` on all models:**
+
+```php
+class Product extends Model
+{
+    protected $fillable = [
+        'tenant_id',
+        'shop_id',
+        'name',
+        'description',
+    ];
+    
+    // Never allow mass assignment of these
+    protected $guarded = ['id', 'uuid'];
+}
+```
+
+## SQL Injection Prevention
+
+### Use Query Builder / Eloquent
+
+<Warning>
+  **Never use raw SQL queries**. Always use Eloquent or Query Builder.
+</Warning>
+
+```php
+// ✅ Correct - Parameterized query
+Product::query()
+    ->where('tenant_id', $tenantId)
+    ->where('name', 'like', '%' . $search . '%')
+    ->get();
+
+// ✅ Correct - Eloquent relationship
+$product->variants()->where('sku', $sku)->first();
+
+// ❌ VULNERABLE - SQL injection risk
+DB::select("SELECT * FROM products WHERE name = '{$name}'");
+```
+
+### Parameterized Queries
+
+If raw queries are absolutely necessary, use parameter binding:
+
+```php
+// ✅ Acceptable - Parameterized
+DB::select('SELECT * FROM products WHERE tenant_id = ? AND name = ?', [$tenantId, $name]);
+
+// ❌ VULNERABLE
+DB::select("SELECT * FROM products WHERE tenant_id = {$tenantId}");
+```
+
+## XSS Prevention
+
+### Frontend Output Escaping
+
+**React automatically escapes output, but be careful with `dangerouslySetInnerHTML`:**
+
+```tsx
+// ✅ Safe - React escapes by default
+<div>{product.name}</div>
+
+// ⚠️ Use with caution - Must sanitize first
+<div dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+```
+
+### Backend Output
+
+**Blade templates auto-escape:**
+
+```blade
+{{-- ✅ Safe - Escaped --}}
+{{ $product->name }}
+
+{{-- ⚠️ Unescaped - Only use with trusted content --}}
+{!! $trustedHtml !!}
+```
+
+## CSRF Protection
+
+**All state-changing requests require CSRF token:**
+
+```tsx
+import { Form } from '@inertiajs/react';
+
+// ✅ Inertia Form includes CSRF automatically
+<Form method="post" action={route('products.store')}>
+  <input name="name" />
+  <button type="submit">Create</button>
+</Form>
+```
+
+## Authentication Security
+
+### Two-Factor Authentication
+
+ShelfWise supports 2FA via Laravel Fortify:
+
+```php
+test('users with two factor enabled are redirected to challenge', function () {
+    $user = User::factory()->create();
+
+    $user->forceFill([
+        'two_factor_secret' => encrypt('test-secret'),
+        'two_factor_recovery_codes' => encrypt(json_encode(['code1', 'code2'])),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    $response = $this->post(route('login'), [
+        'email' => $user->email,
+        'password' => 'password',
+    ]);
+
+    $response->assertRedirect(route('two-factor.login'));
+});
+```
+
+### Rate Limiting
+
+**Auth endpoints are rate limited:**
+
+```php
+RateLimiter::for('login', function (Request $request) {
+    return Limit::perMinute(5)->by($request->email.$request->ip());
+});
+```
+
+## Sensitive Data Handling
+
+### Encryption at Rest
+
+**Encrypt sensitive fields:**
+
+```php
+use Illuminate\Database\Eloquent\Casts\Encrypted;
+
+class User extends Model
+{
+    protected $casts = [
+        'two_factor_secret' => Encrypted::class,
+        'two_factor_recovery_codes' => Encrypted::class,
+    ];
+}
+```
+
+### Hide Sensitive Attributes
+
+```php
+class User extends Model
+{
+    protected $hidden = [
+        'password',
+        'remember_token',
+        'two_factor_secret',
+        'two_factor_recovery_codes',
+    ];
+}
+```
+
+## Security Checklist
+
+<Accordion title="Pre-PR Security Checklist">
+Before any PR involving user data:
+
+- [ ] Input validation via Form Request
+- [ ] Authorization via Policies
+- [ ] No raw SQL queries (use Eloquent)
+- [ ] Sensitive data encrypted at rest
+- [ ] CSRF protection on forms
+- [ ] Rate limiting on auth endpoints
+- [ ] Tenant isolation verified
+- [ ] Mass assignment protection configured
+- [ ] XSS prevention verified
+- [ ] SQL injection vectors eliminated
+</Accordion>
+
+## Code Review for Security
+
+### Automatic Triggers
+
+Invoke `/code-review` or `code-reviewer` agent after:
+
+- Completing a new controller
+- Adding a new service with business logic
+- Creating database migrations
+- Implementing payment/subscription logic
+- **Any security-sensitive code (auth, permissions, crypto)**
+- Any code touching inventory/stock
+
+### Security Review Focus
+
+```php
+// Check these patterns:
+
+// 1. Tenant isolation
+if ($user->tenant_id !== $model->tenant_id) {
+    return false;
+}
+
+// 2. Parameterized queries
+Model::query()->where('column', $value)->get();
+
+// 3. Authorization checks
+Gate::authorize('action', $model);
+
+// 4. Input validation
+public function rules(): array { ... }
+
+// 5. Mass assignment protection
+protected $fillable = [...];
+```
+
+## OWASP Top 10 Compliance
+
+ShelfWise follows OWASP security standards:
+
+| Vulnerability | Prevention |
+|---------------|------------|
+| Injection | Eloquent/Query Builder only |
+| Broken Authentication | 2FA, rate limiting |
+| Sensitive Data Exposure | Encryption, hidden attributes |
+| XML External Entities | N/A (no XML processing) |
+| Broken Access Control | Policy-based authorization |
+| Security Misconfiguration | Environment-based config |
+| XSS | React auto-escaping |
+| Insecure Deserialization | Validation before processing |
+| Known Vulnerabilities | `composer audit`, `npm audit` |
+| Insufficient Logging | Laravel logging, audit trails |
+
+## Security Testing
+
+### Test Authorization
+
+```php
+test('unauthorized users cannot delete products', function () {
+    $cashier = User::factory()->create(['role' => UserRole::CASHIER]);
+    $product = Product::factory()->create();
+    
+    $this->actingAs($cashier)
+        ->delete(route('products.destroy', $product))
+        ->assertForbidden();
+});
+```
+
+### Test Tenant Isolation
+
+```php
+test('users cannot access other tenant data', function () {
+    $tenant1 = Tenant::factory()->create();
+    $tenant2 = Tenant::factory()->create();
+    
+    $user = User::factory()->for($tenant1)->create();
+    $product = Product::factory()->for($tenant2)->create();
+    
+    $this->actingAs($user)
+        ->get(route('products.show', $product))
+        ->assertForbidden();
+});
+```
+
+## Audit Trail
+
+**Critical operations MUST create audit records:**
+
+```php
+StockMovement::query()->create([
+    'tenant_id' => $user->tenant_id,
+    'product_variant_id' => $variant->id,
+    'type' => $type,
+    'quantity' => $quantity,
+    'quantity_before' => $quantityBefore,
+    'quantity_after' => $location->quantity,
+    'created_by' => $user->id,
+    'reason' => $reason,
+]);
+```
+
+<Note>
+  All stock changes MUST go through `StockMovementService` to maintain audit trail.
+</Note>
+
+## Additional Resources
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [Laravel Security Best Practices](https://laravel.com/docs/security)
+- [PHP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/PHP_Configuration_Cheat_Sheet.html)

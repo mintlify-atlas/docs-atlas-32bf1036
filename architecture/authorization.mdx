@@ -1,0 +1,583 @@
+---
+title: Authorization & Permissions
+description: Explore ShelfWise's 8-level role hierarchy and policy-based authorization system
+---
+
+## Overview
+
+ShelfWise implements a sophisticated **role-based authorization system** with 8 distinct roles, each with specific permissions and hierarchy levels. Authorization is enforced through Laravel Policies, ensuring consistent permission checks across the application.
+
+<Note>
+  **Key Principle**: Form Requests handle validation only. Controllers use `Gate::authorize()` before service calls. All authorization logic lives in Policies.
+</Note>
+
+## Role Hierarchy
+
+ShelfWise uses an 8-level role system with numeric levels for hierarchical comparisons:
+
+```php app/Enums/UserRole.php
+enum UserRole: string
+{
+    case SUPER_ADMIN = 'super_admin';           // Level 999
+    case OWNER = 'owner';                       // Level 100
+    case GENERAL_MANAGER = 'general_manager';   // Level 80
+    case STORE_MANAGER = 'store_manager';       // Level 60
+    case ASSISTANT_MANAGER = 'assistant_manager'; // Level 50
+    case SALES_REP = 'sales_rep';              // Level 40
+    case CASHIER = 'cashier';                  // Level 30
+    case INVENTORY_CLERK = 'inventory_clerk';  // Level 30
+}
+```
+
+### Role Levels
+
+```php
+public function level(): int
+{
+    return match ($this) {
+        self::SUPER_ADMIN => 999,
+        self::OWNER => 100,
+        self::GENERAL_MANAGER => 80,
+        self::STORE_MANAGER => 60,
+        self::ASSISTANT_MANAGER => 50,
+        self::SALES_REP => 40,
+        self::CASHIER, self::INVENTORY_CLERK => 30,
+    };
+}
+```
+
+<Warning>
+  Role levels enable hierarchical comparisons like "only Store Manager and above can approve". Use `$user->role->level() >= UserRole::STORE_MANAGER->level()` for such checks.
+</Warning>
+
+## Role Descriptions
+
+<AccordionGroup>
+  <Accordion title="Super Admin (999)">
+    **Platform administrator** with full system access. Manages all tenants, subscriptions, platform settings, and has complete visibility across the entire platform.
+
+    ```php
+    'platform_admin',
+    'manage_all_tenants',
+    'manage_subscriptions',
+    'impersonate_users',
+    // ... all tenant permissions
+    ```
+  </Accordion>
+
+  <Accordion title="Owner (100)">
+    **Full system access** within their tenant. Manages tenant settings, all stores, users, billing, and has complete visibility across the entire organization.
+
+    ```php
+    'manage_tenant',
+    'manage_stores',
+    'manage_users',
+    'view_all_reports',
+    'view_financials',
+    'view_profits',
+    'manage_payroll',
+    'approve_payroll',
+    ```
+  </Accordion>
+
+  <Accordion title="General Manager (80)">
+    Manages **multiple stores**, oversees store managers, handles cross-store reporting, inventory, and user management within the tenant.
+
+    ```php
+    'manage_stores',
+    'manage_users',
+    'view_reports',
+    'manage_inventory',
+    'manage_orders',
+    'approve_supplier_connections',
+    ```
+  </Accordion>
+
+  <Accordion title="Store Manager (60)">
+    Manages a **single store location**, including staff, inventory, products, orders, and customer relationships for that store.
+
+    ```php
+    'manage_store_users',
+    'view_store_reports',
+    'manage_store_inventory',
+    'process_orders',
+    'manage_customers',
+    ```
+  </Accordion>
+
+  <Accordion title="Assistant Manager (50)">
+    Supports store manager with daily operations. Can manage inventory, process orders, and handle customer management tasks.
+
+    ```php
+    'view_store_reports',
+    'manage_store_inventory',
+    'process_orders',
+    'receive_stock',
+    ```
+  </Accordion>
+
+  <Accordion title="Sales Rep (40)">
+    Focuses on **sales activities**, customer acquisition, and order processing. Can view products and inventory to support sales efforts.
+
+    ```php
+    'process_orders',
+    'view_products',
+    'manage_customers',
+    'view_inventory',
+    ```
+  </Accordion>
+
+  <Accordion title="Cashier (30)">
+    Processes **customer sales transactions**, handles basic customer inquiries, and has access to product information at checkout.
+
+    ```php
+    'process_sales',
+    'view_products',
+    'basic_customer_info',
+    ```
+  </Accordion>
+
+  <Accordion title="Inventory Clerk (30)">
+    Manages **stock levels**, receives shipments, performs stock transfers, and maintains accurate inventory records for the store.
+
+    ```php
+    'manage_store_inventory',
+    'receive_stock',
+    'stock_transfers',
+    'view_purchase_orders',
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Permission System
+
+### Checking Permissions
+
+```php
+// On User model
+$user->role->hasPermission('manage_inventory');
+
+// In policies
+if (! $user->role->hasPermission('manage_orders')) {
+    return false;
+}
+
+// Get all permissions for a role
+$permissions = UserRole::STORE_MANAGER->permissions();
+```
+
+### Permission Categories
+
+**Tenant Management**
+- `manage_tenant` - Modify tenant settings
+- `manage_stores` - Create/edit shops
+- `manage_users` - User management
+
+**Inventory & Products**
+- `manage_inventory` - Full inventory control
+- `manage_products` - Create/edit products
+- `manage_store_inventory` - Store-specific inventory
+
+**Orders & Sales**
+- `manage_orders` - Full order management
+- `process_orders` - Process and fulfill
+- `process_sales` - POS transactions
+
+**Financial**
+- `view_financials` - Revenue/expenses
+- `view_profits` - Profit margins
+- `view_costs` - Cost data
+
+**Payroll**
+- `view_payroll` - View payroll data
+- `manage_payroll` - Create/edit payroll
+- `approve_payroll` - Approve pay runs
+
+**Reporting**
+- `view_reports` - Access reports
+- `view_all_reports` - Cross-store reports
+- `export_payroll_reports` - Export data
+
+## Policy-Based Authorization
+
+### Policy Structure
+
+All authorization logic lives in Laravel Policies:
+
+```php app/Policies/ProductPolicy.php
+namespace App\Policies;
+
+use App\Enums\UserRole;
+use App\Models\Product;
+use App\Models\User;
+
+class ProductPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return $user->role->hasPermission('manage_inventory');
+    }
+
+    public function view(User $user, Product $product): bool
+    {
+        // CRITICAL: Always check tenant isolation first
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        // Owners and GMs can view all products in their tenant
+        if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+            return true;
+        }
+
+        // Other roles can only view products in their assigned shops
+        return $user->shops()->where('shops.id', $product->shop_id)->exists();
+    }
+
+    public function create(User $user): bool
+    {
+        return $user->role->hasPermission('manage_inventory');
+    }
+
+    public function update(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+            return true;
+        }
+
+        return $user->shops()->where('shops.id', $product->shop_id)->exists();
+    }
+
+    public function delete(User $user, Product $product): bool
+    {
+        if ($user->tenant_id !== $product->tenant_id) {
+            return false;
+        }
+
+        // Only Owner and GM can delete
+        return in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value]);
+    }
+}
+```
+
+### Policy Patterns
+
+<AccordionGroup>
+  <Accordion title="Tenant Isolation Check">
+    **ALWAYS** check tenant isolation first:
+
+    ```php
+    if ($user->tenant_id !== $model->tenant_id) {
+        return false;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Role-Based Access">
+    Use role comparisons for hierarchical checks:
+
+    ```php
+    // Specific roles
+    if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+        return true;
+    }
+
+    // Hierarchical level
+    if ($user->role->level() < UserRole::STORE_MANAGER->level()) {
+        return false;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Shop-Level Access">
+    Verify shop assignment for shop-scoped resources:
+
+    ```php
+    return $user->shops()->where('shops.id', $product->shop_id)->exists();
+    ```
+  </Accordion>
+
+  <Accordion title="Permission-Based Access">
+    Check specific permissions:
+
+    ```php
+    return $user->role->hasPermission('manage_orders');
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Controller Authorization
+
+### Using Gate::authorize()
+
+Controllers authorize actions before calling services:
+
+```php app/Http/Controllers/ProductController.php
+use Illuminate\Support\Facades\Gate;
+
+class ProductController extends Controller
+{
+    public function __construct(
+        private readonly ProductService $productService
+    ) {}
+
+    public function index()
+    {
+        Gate::authorize('viewAny', Product::class);
+        
+        $products = Product::query()->with('variants')->paginate(20);
+        
+        return Inertia::render('Products/Index', [
+            'products' => $products,
+        ]);
+    }
+
+    public function store(StoreProductRequest $request)
+    {
+        Gate::authorize('create', Product::class);
+        
+        $product = $this->productService->create(
+            $request->validated(),
+            auth()->user()->tenant,
+            $request->shop
+        );
+        
+        return redirect()->route('products.show', $product);
+    }
+
+    public function update(UpdateProductRequest $request, Product $product)
+    {
+        Gate::authorize('update', $product);
+        
+        $product = $this->productService->update($product, $request->validated());
+        
+        return redirect()->route('products.show', $product);
+    }
+
+    public function destroy(Product $product)
+    {
+        Gate::authorize('delete', $product);
+        
+        $product->delete();
+        
+        return redirect()->route('products.index');
+    }
+}
+```
+
+<Note>
+  Form Requests **always** return `true` from `authorize()`. Authorization happens in controllers via `Gate::authorize()`.
+</Note>
+
+### Form Request Pattern
+
+```php app/Http/Requests/StoreProductRequest.php
+class StoreProductRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        // ALWAYS return true - authorization happens in controller
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'name' => ['required', 'string', 'max:255'],
+            'shop_id' => ['required', 'exists:shops,id'],
+            'price' => ['required', 'numeric', 'min:0'],
+        ];
+    }
+}
+```
+
+## Order Policy Example
+
+Here's a complete example showing state-based authorization:
+
+```php app/Policies/OrderPolicy.php
+class OrderPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return $user->role->hasPermission('manage_orders');
+    }
+
+    public function view(User $user, Order $order): bool
+    {
+        if ($user->tenant_id !== $order->tenant_id) {
+            return false;
+        }
+
+        if (in_array($user->role->value, [UserRole::OWNER->value, UserRole::GENERAL_MANAGER->value])) {
+            return true;
+        }
+
+        return $user->shops()->where('shops.id', $order->shop_id)->exists();
+    }
+
+    public function update(User $user, Order $order): bool
+    {
+        if ($user->tenant_id !== $order->tenant_id) {
+            return false;
+        }
+
+        // Can only edit pending/confirmed orders
+        if (! in_array($order->status, ['pending', 'confirmed'])) {
+            return false;
+        }
+
+        return $user->role->hasPermission('manage_orders');
+    }
+
+    public function cancel(User $user, Order $order): bool
+    {
+        if ($user->tenant_id !== $order->tenant_id) {
+            return false;
+        }
+
+        // Cannot cancel completed/cancelled orders
+        if (in_array($order->status, ['completed', 'cancelled'])) {
+            return false;
+        }
+
+        // Requires Store Manager or above
+        if ($user->role->level() < UserRole::STORE_MANAGER->level()) {
+            return false;
+        }
+
+        return $user->role->hasPermission('manage_orders');
+    }
+
+    public function refund(User $user, Order $order): bool
+    {
+        if ($user->tenant_id !== $order->tenant_id) {
+            return false;
+        }
+
+        // Only completed orders can be refunded
+        if ($order->status !== 'completed') {
+            return false;
+        }
+
+        // Requires General Manager or above
+        if ($user->role->level() < UserRole::GENERAL_MANAGER->level()) {
+            return false;
+        }
+
+        return $user->role->hasPermission('manage_orders');
+    }
+}
+```
+
+## Multi-Shop Authorization
+
+### Shop Assignment
+
+Users can be assigned to specific shops:
+
+```php
+// User-Shop relationship (many-to-many)
+$user->shops()->attach($shop->id, ['tenant_id' => $tenant->id]);
+
+// Check if user has access to shop
+$hasAccess = $user->shops()->where('shops.id', $shopId)->exists();
+```
+
+### Cross-Shop Access
+
+Some roles can access all shops within their tenant:
+
+```php app/Enums/UserRole.php
+public function canAccessMultipleStores(): bool
+{
+    return match ($this) {
+        self::SUPER_ADMIN, self::OWNER, self::GENERAL_MANAGER => true,
+        default => false,
+    };
+}
+```
+
+## Blade/Inertia Authorization
+
+### In Blade Templates
+
+```blade
+@can('update', $product)
+    <a href="{{ route('products.edit', $product) }}">Edit</a>
+@endcan
+
+@can('delete', $product)
+    <button>Delete</button>
+@endcan
+```
+
+### In React/Inertia
+
+```typescript
+import { usePage } from '@inertiajs/react';
+
+const { auth } = usePage().props;
+
+// Check permission
+if (auth.user.role.permissions.includes('manage_inventory')) {
+    // Show inventory management UI
+}
+
+// Check role level
+if (auth.user.role.level >= 60) { // Store Manager or above
+    // Show management features
+}
+```
+
+## Testing Authorization
+
+```php tests/Feature/ProductPolicyTest.php
+test('store manager can view products in their shop', function () {
+    $tenant = Tenant::factory()->create();
+    $shop = Shop::factory()->for($tenant)->create();
+    $user = User::factory()->for($tenant)->create([
+        'role' => UserRole::STORE_MANAGER,
+    ]);
+    $user->shops()->attach($shop->id);
+    
+    $product = Product::factory()->for($shop)->create();
+    
+    expect($user->can('view', $product))->toBeTrue();
+});
+
+test('store manager cannot view products in other shops', function () {
+    $tenant = Tenant::factory()->create();
+    $shop1 = Shop::factory()->for($tenant)->create();
+    $shop2 = Shop::factory()->for($tenant)->create();
+    $user = User::factory()->for($tenant)->create([
+        'role' => UserRole::STORE_MANAGER,
+    ]);
+    $user->shops()->attach($shop1->id);
+    
+    $product = Product::factory()->for($shop2)->create();
+    
+    expect($user->can('view', $product))->toBeFalse();
+});
+```
+
+## Authorization Checklist
+
+- [ ] All policies check tenant isolation first
+- [ ] Controllers use `Gate::authorize()` before service calls
+- [ ] Form Requests return `true` from `authorize()`
+- [ ] Role levels used for hierarchical checks
+- [ ] Shop access verified for shop-scoped resources
+- [ ] State-based authorization (order status, etc.) implemented
+- [ ] Super admin access is intentional and documented
+- [ ] Frontend hides unauthorized actions
+
+## Related Documentation
+
+- [Multi-Tenancy](/architecture/multi-tenancy) - How tenant isolation works
+- [Service Layer](/architecture/service-layer) - How services receive authorized data
+- [Database Schema](/architecture/database-schema) - User and tenant schema

@@ -1,122 +1,138 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "ShelfWise",
+  "theme": "maple",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#3b82f6",
+    "light": "#93c5fd",
+    "dark": "#1e40af"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/gHoSTeCHs/shelfwiser"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/gHoSTeCHs/shelfwiser"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Getting Started",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Introduction",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Setup",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
-            ]
-          },
-          {
-            "group": "Writing content",
-            "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
-            ]
-          },
-          {
-            "group": "AI tools",
-            "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "setup/installation",
+              "setup/configuration",
+              "setup/multi-tenancy"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Core Features",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Inventory Management",
             "pages": [
-              "api-reference/introduction"
+              "features/inventory/products",
+              "features/inventory/stock-movements",
+              "features/inventory/stock-take",
+              "features/inventory/reorder-alerts"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Sales & POS",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "features/sales/point-of-sale",
+              "features/sales/orders",
+              "features/sales/returns",
+              "features/sales/receipts"
+            ]
+          },
+          {
+            "group": "E-Commerce",
+            "pages": [
+              "features/ecommerce/storefront",
+              "features/ecommerce/customers",
+              "features/ecommerce/payments"
+            ]
+          },
+          {
+            "group": "Purchasing",
+            "pages": [
+              "features/purchasing/suppliers",
+              "features/purchasing/purchase-orders",
+              "features/purchasing/catalog"
+            ]
+          },
+          {
+            "group": "Payroll",
+            "pages": [
+              "features/payroll/overview",
+              "features/payroll/pay-runs",
+              "features/payroll/wage-advances",
+              "features/payroll/deductions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Backend",
+            "pages": [
+              "architecture/service-layer",
+              "architecture/multi-tenancy",
+              "architecture/authorization",
+              "architecture/database-schema"
+            ]
+          },
+          {
+            "group": "Frontend",
+            "pages": [
+              "architecture/inertia-react",
+              "architecture/components",
+              "architecture/routing",
+              "architecture/state-management"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Development",
+        "groups": [
+          {
+            "group": "Guidelines",
+            "pages": [
+              "development/conventions",
+              "development/testing",
+              "development/security"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "api/services",
+              "api/models",
+              "api/enums",
+              "api/policies"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

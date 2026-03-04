@@ -1,0 +1,523 @@
+---
+title: Payment Integration
+description: Process payments for e-commerce orders using multiple payment methods including Paystack, Cash on Delivery, and Bank Transfer
+---
+
+## Overview
+
+ShelfWise supports multiple payment methods for e-commerce transactions, with built-in integration for Paystack and support for offline payment methods. All payments are processed through the checkout flow and tracked with detailed audit trails.
+
+## Payment Methods
+
+Available payment methods are defined in the `PaymentMethod` enum:
+
+```php
+// app/Enums/PaymentMethod.php:6-14
+enum PaymentMethod: string
+{
+    case CASH = 'cash';
+    case CARD = 'card';
+    case MOBILE_MONEY = 'mobile_money';
+    case BANK_TRANSFER = 'bank_transfer';
+    case CHEQUE = 'cheque';
+    case CUSTOMER_CREDIT = 'customer_credit';
+    case PAYSTACK = 'paystack';
+    case CASH_ON_DELIVERY = 'cash_on_delivery';
+}
+```
+
+### Storefront Payment Methods
+
+The storefront checkout only allows specific payment methods:
+
+```php
+// app/Enums/PaymentMethod.php:168-175
+PaymentMethod::storefrontValues();
+// Returns: ['cash_on_delivery', 'paystack', 'bank_transfer']
+```
+
+<Note>
+  Other payment methods (cash, card, mobile money, customer credit) are reserved for POS and internal order processing.
+</Note>
+
+### Payment Method Properties
+
+<Accordion title="Payment Method Details">
+  Each payment method has associated metadata:
+  
+  ```php
+  $method = PaymentMethod::PAYSTACK;
+  
+  $method->label();                      // 'Paystack'
+  $method->description();                // 'Online payment via Paystack'
+  $method->color();                      // 'primary'
+  $method->icon();                       // 'credit-card'
+  $method->requiresReference();          // true
+  $method->isInstant();                  // true
+  $method->requiresOnlineProcessing();   // true
+  ```
+</Accordion>
+
+## Checkout Flow
+
+### Step 1: Display Checkout Page
+
+Customers access the checkout page with their cart summary:
+
+```php
+// app/Http/Controllers/Storefront/CheckoutController.php:30-98
+public function index(Shop $shop): Response|RedirectResponse
+{
+    $customer = auth('customer')->user();
+    
+    $cart = $this->cartService->getCart($shop, $customer->id);
+    $cartSummary = $this->cartService->getCartSummary($cart);
+    
+    // Validate stock availability
+    // ...
+    
+    $paymentReference = $this->generatePaymentReference($shop);
+    
+    return Inertia::render('Storefront/Checkout', [
+        'shop' => $shop,
+        'cart' => $cart,
+        'cartSummary' => $cartSummary,
+        'addresses' => $customer->addresses,
+        'paymentReference' => $paymentReference,
+    ]);
+}
+```
+
+### Step 2: Process Checkout
+
+When the customer submits the checkout form:
+
+```php
+// app/Http/Controllers/Storefront/CheckoutController.php:113-210
+public function process(Request $request, Shop $shop): RedirectResponse
+{
+    $validated = $request->validate([
+        'shipping_address' => ['required', 'array'],
+        'payment_method' => ['required', 'string', Rule::in(PaymentMethod::storefrontValues())],
+        'payment_reference' => ['nullable', 'string'],
+        'idempotency_key' => ['nullable', 'string'],
+        // ...
+    ]);
+    
+    // Check for duplicate orders using idempotency key
+    if ($idempotencyKey) {
+        $existingOrder = Order::where('offline_id', $idempotencyKey)
+            ->where('shop_id', $shop->id)
+            ->first();
+        
+        if ($existingOrder) {
+            // Return to success/pending page
+        }
+    }
+    
+    // Create order from cart
+    $order = $this->checkoutService->createOrderFromCart(
+        $cart,
+        $customer,
+        $validated['shipping_address'],
+        $billingAddress,
+        $validated['payment_method'],
+        $validated['customer_notes'] ?? null,
+        $paymentReference,
+        $idempotencyKey
+    );
+    
+    // Redirect based on payment method
+    $paymentMethod = PaymentMethod::from($validated['payment_method']);
+    
+    if ($paymentMethod->requiresOnlineProcessing()) {
+        return redirect()->route('storefront.checkout.pending', [$shop->slug, $order]);
+    }
+    
+    return redirect()->route('storefront.checkout.success', [$shop->slug, $order]);
+}
+```
+
+<Warning>
+  Always use idempotency keys for checkout requests to prevent duplicate orders if the customer refreshes the page or submits multiple times.
+</Warning>
+
+### Step 3: Create Order from Cart
+
+The `CheckoutService` handles order creation with stock validation:
+
+```php
+// app/Services/CheckoutService.php:27-178
+public function createOrderFromCart(
+    Cart $cart,
+    Customer $customer,
+    array $shippingAddress,
+    array $billingAddress,
+    string $paymentMethod = 'cash_on_delivery',
+    ?string $customerNotes = null,
+    ?string $paymentReference = null,
+    ?string $idempotencyKey = null
+): Order {
+    return DB::transaction(function () use (...) {
+        $cartSummary = $this->cartService->getCartSummary($cart);
+        
+        // Lock inventory locations for product items
+        $locations = InventoryLocation::where('location_type', Shop::class)
+            ->where('location_id', $cart->shop_id)
+            ->whereIn('product_variant_id', $variantIds)
+            ->lockForUpdate()
+            ->get();
+        
+        // Validate stock availability
+        foreach ($productItems as $item) {
+            $location = $locations->get($item->product_variant_id);
+            $availableStock = $location ? $location->quantity - $location->reserved_quantity : 0;
+            
+            if ($availableStock < $item->quantity) {
+                throw new \Exception("Insufficient stock for {$item->productVariant->product->name}");
+            }
+        }
+        
+        // Create order
+        $order = Order::create([
+            'tenant_id' => $cart->shop->tenant_id,
+            'shop_id' => $cart->shop_id,
+            'customer_id' => $customer->id,
+            'order_type' => OrderType::CUSTOMER->value,
+            'status' => OrderStatus::PENDING->value,
+            'payment_status' => PaymentStatus::UNPAID->value,
+            'payment_method' => $paymentMethod,
+            'payment_reference' => $paymentReference,
+            'offline_id' => $idempotencyKey,
+            'subtotal' => $cartSummary['subtotal'],
+            'tax_amount' => $cartSummary['tax'],
+            'shipping_cost' => $cartSummary['shipping_fee'],
+            'total_amount' => $cartSummary['total'],
+            // ...
+        ]);
+        
+        // Create order items and decrement stock
+        // Delete cart items
+        // Return order with relationships
+    });
+}
+```
+
+## Paystack Integration
+
+### Payment Reference Generation
+
+Generate unique payment references for each transaction:
+
+```php
+// app/Http/Controllers/Storefront/CheckoutController.php:105-108
+protected function generatePaymentReference(Shop $shop): string
+{
+    return 'PAY-' . Str::uuid()->toString();
+}
+```
+
+### Verifying Paystack Payments
+
+After the customer completes payment on Paystack, verify the transaction:
+
+```php
+// app/Services/CheckoutService.php:183-244
+public function verifyPaystackPayment(string $reference, Shop $shop): ?Order
+{
+    $order = Order::where('payment_reference', $reference)
+        ->where('shop_id', $shop->id)
+        ->first();
+    
+    if (!$order || $order->payment_status === PaymentStatus::PAID->value) {
+        return $order;
+    }
+    
+    $secretKey = config('services.paystack.secret_key');
+    
+    $response = Http::withToken($secretKey)
+        ->get("https://api.paystack.co/transaction/verify/{$reference}");
+    
+    if ($response->successful()) {
+        $data = $response->json();
+        
+        if ($data['status'] === true && $data['data']['status'] === 'success') {
+            $this->updatePaymentStatus(
+                $reference,
+                PaymentStatus::PAID,
+                $data['data']['id'] ?? null
+            );
+            $order->refresh();
+        }
+    }
+    
+    return $order;
+}
+```
+
+### Payment Callback
+
+Handle redirects from Paystack after payment:
+
+```php
+// app/Http/Controllers/Storefront/CheckoutController.php:277-320
+public function paymentCallback(Request $request, Shop $shop): RedirectResponse
+{
+    $reference = $request->query('reference');
+    
+    $order = $this->checkoutService->verifyPaystackPayment($reference, $shop);
+    
+    if ($order && $order->payment_status === PaymentStatus::PAID->value) {
+        return redirect()
+            ->route('storefront.checkout.success', [$shop->slug, $order])
+            ->with('success', 'Payment successful!');
+    }
+    
+    if ($order) {
+        return redirect()
+            ->route('storefront.checkout.pending', [$shop->slug, $order])
+            ->with('info', 'Payment is being processed.');
+    }
+    
+    return redirect()
+        ->route('storefront.index', $shop->slug)
+        ->with('error', 'Unable to verify payment.');
+}
+```
+
+### Webhook Handler
+
+Receive real-time payment notifications from Paystack:
+
+```php
+// app/Http/Controllers/Storefront/CheckoutController.php:325-375
+public function paymentWebhook(Request $request, Shop $shop): JsonResponse
+{
+    $paystackSignature = $request->header('x-paystack-signature');
+    $payload = $request->getContent();
+    $secretKey = config('services.paystack.secret_key');
+    
+    // Verify webhook signature
+    $computedSignature = hash_hmac('sha512', $payload, $secretKey);
+    
+    if (!hash_equals($computedSignature, $paystackSignature)) {
+        return response()->json(['error' => 'Invalid signature'], 400);
+    }
+    
+    $event = $request->input('event');
+    $data = $request->input('data');
+    
+    if ($event === 'charge.success') {
+        $reference = $data['reference'] ?? null;
+        
+        if ($reference) {
+            $this->checkoutService->updatePaymentStatus(
+                $reference,
+                PaymentStatus::PAID,
+                $data['id'] ?? null
+            );
+        }
+    }
+    
+    return response()->json(['status' => 'success']);
+}
+```
+
+<Note>
+  Always validate webhook signatures to ensure requests are genuinely from Paystack and not malicious actors.
+</Note>
+
+## Updating Payment Status
+
+When a payment is confirmed, update the order status:
+
+```php
+// app/Services/CheckoutService.php:249-296
+public function updatePaymentStatus(
+    string $paymentReference,
+    PaymentStatus $status,
+    ?string $transactionId = null
+): bool {
+    $order = Order::where('payment_reference', $paymentReference)->first();
+    
+    if (!$order) {
+        return false;
+    }
+    
+    return DB::transaction(function () use ($order, $status, $transactionId, $paymentReference) {
+        $order->update([
+            'payment_status' => $status->value,
+        ]);
+        
+        if ($status === PaymentStatus::PAID) {
+            $order->update([
+                'status' => OrderStatus::CONFIRMED->value,
+                'confirmed_at' => now(),
+            ]);
+            
+            // Create payment record
+            OrderPayment::create([
+                'tenant_id' => $order->tenant_id,
+                'order_id' => $order->id,
+                'amount' => $order->total_amount,
+                'payment_method' => $order->payment_method,
+                'reference_number' => $transactionId ?? $paymentReference,
+                'status' => 'completed',
+                'paid_at' => now(),
+                'notes' => 'Payment verified via Paystack',
+            ]);
+        }
+        
+        return true;
+    });
+}
+```
+
+## Payment Gateway Manager
+
+For more advanced payment gateway integrations, use the `PaymentGatewayManager`:
+
+```php
+// app/Http/Controllers/PaymentController.php:13-15
+public function __construct(
+    protected PaymentGatewayManager $gatewayManager
+) {}
+```
+
+### Initialize Payment
+
+```php
+// app/Http/Controllers/PaymentController.php:81-139
+public function initialize(Request $request, Order $order)
+{
+    $validated = $request->validate([
+        'gateway' => ['required', 'string'],
+    ]);
+    
+    $gateway = $this->gatewayManager->gateway($validated['gateway']);
+    
+    if (!$gateway->isAvailable()) {
+        return back()->with('error', 'Payment gateway not available');
+    }
+    
+    $result = $gateway->initializePayment($order, [
+        'callback_url' => route('payment.callback', [
+            'gateway' => $validated['gateway'],
+            'order' => $order->id,
+        ]),
+    ]);
+    
+    if (!$result->success) {
+        return back()->with('error', $result->message);
+    }
+    
+    $order->update([
+        'payment_gateway' => $validated['gateway'],
+        'payment_reference' => $result->reference,
+    ]);
+    
+    if ($result->requiresRedirect()) {
+        return redirect($result->authorizationUrl);
+    }
+}
+```
+
+### Get Available Gateways
+
+```php
+// app/Http/Controllers/PaymentController.php:171-185
+public function gateways(): JsonResponse
+{
+    $gateways = [];
+    
+    foreach ($this->gatewayManager->getAvailable() as $id => $gateway) {
+        $gateways[] = [
+            'id' => $id,
+            'name' => $gateway->getName(),
+            'supports_inline' => $gateway->supportsInlinePayment(),
+            'public_key' => $gateway->getPublicKey(),
+        ];
+    }
+    
+    return response()->json($gateways);
+}
+```
+
+## Cash on Delivery
+
+For offline payment methods like Cash on Delivery:
+
+```php
+$order = $checkoutService->createOrderFromCart(
+    $cart,
+    $customer,
+    $shippingAddress,
+    $billingAddress,
+    'cash_on_delivery',  // No online processing required
+    $customerNotes,
+    null,  // No payment reference
+    $idempotencyKey
+);
+
+// Order is created with payment_status = 'unpaid'
+// Staff will manually update when payment is received on delivery
+```
+
+## Bank Transfer
+
+For bank transfer payments:
+
+```php
+$order = $checkoutService->createOrderFromCart(
+    $cart,
+    $customer,
+    $shippingAddress,
+    $billingAddress,
+    'bank_transfer',
+    'Please transfer to Account: 0123456789',
+    null,
+    $idempotencyKey
+);
+
+// Staff verifies bank transfer manually and updates payment status
+$checkoutService->updatePaymentStatus(
+    $order->payment_reference,
+    PaymentStatus::PAID,
+    'BANK-TXN-12345'
+);
+```
+
+## Configuration
+
+Set up Paystack credentials in your `.env` file:
+
+```bash
+PAYSTACK_PUBLIC_KEY=pk_live_xxxxxxxxxxxxx
+PAYSTACK_SECRET_KEY=sk_live_xxxxxxxxxxxxx
+```
+
+And in `config/services.php`:
+
+```php
+'paystack' => [
+    'public_key' => env('PAYSTACK_PUBLIC_KEY'),
+    'secret_key' => env('PAYSTACK_SECRET_KEY'),
+],
+```
+
+## Security Best Practices
+
+<Warning>
+  - Always verify webhook signatures to prevent payment fraud
+  - Use HTTPS for all payment-related endpoints
+  - Never expose secret keys in frontend code
+  - Validate payment amounts server-side before confirming
+  - Use idempotency keys to prevent duplicate charges
+  - Log all payment attempts for audit trails
+</Warning>
+
+## Related Resources
+
+- [Storefront Configuration](/features/ecommerce/storefront)
+- [Customer Management](/features/ecommerce/customers)
+- [Order Management](/features/sales/orders)

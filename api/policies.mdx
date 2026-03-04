@@ -1,0 +1,609 @@
+---
+title: Policies
+description: Laravel authorization policies defining access control rules in ShelfWise
+---
+
+ShelfWise uses Laravel Policies for all authorization checks, implementing a hierarchical role-based access control (RBAC) system. Policies enforce tenant isolation and shop-level access restrictions.
+
+## Policy Architecture
+
+- **Location**: `app/Policies/`
+- **Form Requests**: Always return `true` in `authorize()` method
+- **Controllers**: Use `Gate::authorize()` before service calls
+- **Policies**: Contain ALL authorization logic
+- **Tenant Isolation**: First check in every policy method
+
+---
+
+## Authorization Flow
+
+```php
+// Controller
+public function store(StoreProductRequest $request)
+{
+    Gate::authorize('create', Product::class);
+    
+    $product = $this->productService->createProduct(
+        $request->validated()
+    );
+    
+    return redirect()->route('products.index');
+}
+
+// Form Request
+public function authorize()
+{
+    return true; // Authorization handled by Gate in controller
+}
+
+// Policy
+public function create(User $user): bool
+{
+    return $user->role->hasPermission('manage_inventory');
+}
+```
+
+---
+
+## ProductPolicy
+
+Controls access to product management operations.
+
+**Location**: `app/Policies/ProductPolicy.php`
+
+### viewAny()
+
+Determines if user can view the product list.
+
+<ParamField path="user" type="User" required>
+  User requesting access
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Whether user can view products
+</ResponseField>
+
+```php
+public function viewAny(User $user): bool
+{
+    return $user->role->hasPermission('manage_inventory');
+}
+```
+
+**Allowed Roles**: Owner, General Manager, Store Manager, Assistant Manager, Inventory Clerk
+
+### view()
+
+Determines if user can view a specific product.
+
+<ParamField path="user" type="User" required>
+  User requesting access
+</ParamField>
+
+<ParamField path="product" type="Product" required>
+  Product to view
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Whether user can view this product
+</ResponseField>
+
+```php
+public function view(User $user, Product $product): bool
+{
+    // Tenant isolation
+    if ($user->tenant_id !== $product->tenant_id) {
+        return false;
+    }
+    
+    // Cross-store roles can view any product
+    if (in_array($user->role->value, [
+        UserRole::OWNER->value, 
+        UserRole::GENERAL_MANAGER->value
+    ])) {
+        return true;
+    }
+    
+    // Other roles must be assigned to product's shop
+    return $user->shops()
+        ->where('shops.id', $product->shop_id)
+        ->exists();
+}
+```
+
+<Accordion title="Authorization Logic">
+  1. **Tenant Check**: User must belong to same tenant as product
+  2. **Role Check**: Owner and General Manager have cross-store access
+  3. **Shop Assignment**: Other roles must be assigned to product's shop
+</Accordion>
+
+### create()
+
+Determines if user can create products.
+
+```php
+public function create(User $user): bool
+{
+    return $user->role->hasPermission('manage_inventory');
+}
+```
+
+### update()
+
+Determines if user can update a product.
+
+```php
+public function update(User $user, Product $product): bool
+{
+    if ($user->tenant_id !== $product->tenant_id) {
+        return false;
+    }
+    
+    if (in_array($user->role->value, [
+        UserRole::OWNER->value, 
+        UserRole::GENERAL_MANAGER->value
+    ])) {
+        return true;
+    }
+    
+    return $user->shops()
+        ->where('shops.id', $product->shop_id)
+        ->exists();
+}
+```
+
+### delete()
+
+Determines if user can delete a product.
+
+```php
+public function delete(User $user, Product $product): bool
+{
+    if ($user->tenant_id !== $product->tenant_id) {
+        return false;
+    }
+    
+    // Only Owner and General Manager can delete
+    return in_array($user->role->value, [
+        UserRole::OWNER->value,
+        UserRole::GENERAL_MANAGER->value,
+    ]);
+}
+```
+
+**Allowed Roles**: Owner, General Manager
+
+### Example Usage
+
+```php
+use Illuminate\Support\Facades\Gate;
+use App\Models\Product;
+
+// Check if user can view products
+if (Gate::allows('viewAny', Product::class)) {
+    $products = Product::query()->get();
+}
+
+// Check if user can view specific product
+if (Gate::allows('view', $product)) {
+    return view('products.show', compact('product'));
+}
+
+// Authorize or throw exception
+Gate::authorize('update', $product);
+
+// Check multiple abilities
+if (Gate::any(['update', 'delete'], $product)) {
+    // Show edit/delete buttons
+}
+```
+
+---
+
+## OrderPolicy
+
+Controls access to order management and fulfillment operations.
+
+**Location**: `app/Policies/OrderPolicy.php`
+
+### viewAny()
+
+```php
+public function viewAny(User $user): bool
+{
+    return $user->role->hasPermission('manage_orders');
+}
+```
+
+### view()
+
+```php
+public function view(User $user, Order $order): bool
+{
+    if ($user->tenant_id !== $order->tenant_id) {
+        return false;
+    }
+    
+    if (in_array($user->role->value, [
+        UserRole::OWNER->value, 
+        UserRole::GENERAL_MANAGER->value
+    ])) {
+        return true;
+    }
+    
+    return $user->shops()
+        ->where('shops.id', $order->shop_id)
+        ->exists();
+}
+```
+
+### update()
+
+```php
+public function update(User $user, Order $order): bool
+{
+    if ($user->tenant_id !== $order->tenant_id) {
+        return false;
+    }
+    
+    // Can only edit pending or confirmed orders
+    if (!in_array($order->status, ['pending', 'confirmed'])) {
+        return false;
+    }
+    
+    return $user->role->hasPermission('manage_orders');
+}
+```
+
+<Accordion title="Edit Restrictions">
+  Orders can only be edited when in:
+  - **PENDING** status - Before confirmation
+  - **CONFIRMED** status - After confirmation but before processing
+  
+  Once an order enters PROCESSING or later stages, it cannot be edited.
+</Accordion>
+
+### cancel()
+
+```php
+public function cancel(User $user, Order $order): bool
+{
+    if ($user->tenant_id !== $order->tenant_id) {
+        return false;
+    }
+    
+    // Cannot cancel completed or already cancelled orders
+    if (in_array($order->status, ['completed', 'cancelled'])) {
+        return false;
+    }
+    
+    // Only Store Manager and above can cancel orders
+    if ($user->role->level() < UserRole::STORE_MANAGER->level()) {
+        return false;
+    }
+    
+    return $user->role->hasPermission('manage_orders');
+}
+```
+
+**Minimum Role**: Store Manager (level 60)
+
+### refund()
+
+```php
+public function refund(User $user, Order $order): bool
+{
+    if ($user->tenant_id !== $order->tenant_id) {
+        return false;
+    }
+    
+    // Can only refund completed orders
+    if ($order->status !== 'completed') {
+        return false;
+    }
+    
+    // Only General Manager and above can process refunds
+    if ($user->role->level() < UserRole::GENERAL_MANAGER->level()) {
+        return false;
+    }
+    
+    return $user->role->hasPermission('manage_orders');
+}
+```
+
+**Minimum Role**: General Manager (level 80)
+
+### fulfill()
+
+```php
+public function fulfill(User $user, Order $order): bool
+{
+    if ($user->tenant_id !== $order->tenant_id) {
+        return false;
+    }
+    
+    // Can only fulfill confirmed orders
+    if ($order->status !== 'confirmed') {
+        return false;
+    }
+    
+    return $user->role->hasPermission('manage_orders');
+}
+```
+
+### Example Usage
+
+```php
+// In controller
+public function cancel(Order $order)
+{
+    Gate::authorize('cancel', $order);
+    
+    $order = $this->orderService->cancelOrder(
+        $order, 
+        auth()->user(),
+        request()->input('reason')
+    );
+    
+    return redirect()->back()
+        ->with('success', 'Order cancelled successfully');
+}
+
+// In Inertia view props
+return Inertia::render('Orders/Show', [
+    'order' => $order,
+    'can' => [
+        'update' => Gate::allows('update', $order),
+        'cancel' => Gate::allows('cancel', $order),
+        'refund' => Gate::allows('refund', $order),
+    ],
+]);
+```
+
+---
+
+## Additional Policies
+
+<Tabs>
+  <Tab title="CustomerPolicy">
+    **Location**: `app/Policies/CustomerPolicy.php`
+    
+    Controls customer management access.
+    
+    ### Key Methods
+    
+    - `viewAny()` - View customer list
+    - `view()` - View customer details
+    - `create()` - Create new customer
+    - `update()` - Update customer info
+    - `delete()` - Delete customer (soft delete)
+    - `setCreditLimit()` - Modify customer credit limit
+    
+    ### Role Requirements
+    
+    - **View/Create/Update**: Sales Rep and above
+    - **Delete**: Store Manager and above
+    - **Set Credit Limit**: General Manager and above
+  </Tab>
+  
+  <Tab title="ShopPolicy">
+    **Location**: `app/Policies/ShopPolicy.php`
+    
+    Controls shop/store management.
+    
+    ### Key Methods
+    
+    - `viewAny()` - View shop list
+    - `view()` - View shop details
+    - `create()` - Create new shop
+    - `update()` - Update shop settings
+    - `delete()` - Delete shop
+    - `manageSettings()` - Modify shop configuration
+    
+    ### Role Requirements
+    
+    - **View**: All roles (filtered by assignment)
+    - **Create/Update/Delete**: Owner only
+    - **Manage Settings**: Owner and General Manager
+  </Tab>
+  
+  <Tab title="PayrollPolicy">
+    **Location**: `app/Policies/PayrollPolicy.php`
+    
+    Controls payroll processing access.
+    
+    ### Key Methods
+    
+    - `viewAny()` - View payroll list
+    - `view()` - View payroll details
+    - `create()` - Create pay run
+    - `approve()` - Approve pay run
+    - `process()` - Process payments
+    - `viewReports()` - Access payroll reports
+    - `exportReports()` - Export payroll data
+    
+    ### Role Requirements
+    
+    - **View**: Store Manager and above
+    - **Create**: Store Manager and above
+    - **Approve**: General Manager and above
+    - **Process**: Owner only
+    - **Export**: General Manager and above
+  </Tab>
+  
+  <Tab title="ReportPolicy">
+    **Location**: `app/Policies/ReportPolicy.php`
+    
+    Controls access to business reports.
+    
+    ### Key Methods
+    
+    - `viewSalesReports()` - Sales analytics
+    - `viewInventoryReports()` - Stock reports
+    - `viewFinancialReports()` - P&L, expenses
+    - `viewProfits()` - Profit margins
+    - `viewCosts()` - Cost breakdowns
+    - `export()` - Export report data
+    
+    ### Role Requirements
+    
+    - **Sales/Inventory**: Store Manager and above
+    - **Financial**: General Manager and above
+    - **Profits/Costs**: Owner and General Manager
+    - **Export**: General Manager and above
+  </Tab>
+</Tabs>
+
+---
+
+## Policy Best Practices
+
+<Accordion title="Tenant Isolation First">
+  Always check tenant isolation before any other logic:
+  
+  ```php
+  public function view(User $user, Product $product): bool
+  {
+      // ALWAYS first check
+      if ($user->tenant_id !== $product->tenant_id) {
+          return false;
+      }
+      
+      // Then check role/permissions
+      return $user->role->hasPermission('view_products');
+  }
+  ```
+</Accordion>
+
+<Accordion title="Shop-Level Access">
+  Check shop assignments for single-store roles:
+  
+  ```php
+  // Cross-store roles
+  if ($user->role->canAccessMultipleStores()) {
+      return true;
+  }
+  
+  // Single-store roles
+  return $user->shops()
+      ->where('shops.id', $resource->shop_id)
+      ->exists();
+  ```
+</Accordion>
+
+<Accordion title="Role Level Comparison">
+  Use role levels for hierarchical checks:
+  
+  ```php
+  if ($user->role->level() >= UserRole::GENERAL_MANAGER->level()) {
+      // High-level operations
+  }
+  
+  if ($user->role->level() < UserRole::STORE_MANAGER->level()) {
+      return false; // Insufficient authority
+  }
+  ```
+</Accordion>
+
+<Accordion title="State-Based Authorization">
+  Consider resource state in authorization:
+  
+  ```php
+  public function update(User $user, Order $order): bool
+  {
+      // Cannot edit completed orders
+      if ($order->status->isFinal()) {
+          return false;
+      }
+      
+      return $user->role->hasPermission('manage_orders');
+  }
+  ```
+</Accordion>
+
+<Accordion title="Permission-Based Checks">
+  Use permission system for granular control:
+  
+  ```php
+  public function export(User $user): bool
+  {
+      return $user->role->hasPermission('export_data') ||
+             $user->role->hasPermission('export_reports');
+  }
+  ```
+</Accordion>
+
+---
+
+## Testing Policies
+
+```php
+use Tests\TestCase;
+use App\Models\User;
+use App\Models\Product;
+use App\Enums\UserRole;
+
+class ProductPolicyTest extends TestCase
+{
+    public function test_owner_can_view_any_product()
+    {
+        $user = User::factory()->create([
+            'role' => UserRole::OWNER,
+        ]);
+        
+        $this->actingAs($user);
+        
+        $this->assertTrue(
+            Gate::allows('viewAny', Product::class)
+        );
+    }
+    
+    public function test_cashier_cannot_delete_product()
+    {
+        $user = User::factory()->create([
+            'role' => UserRole::CASHIER,
+        ]);
+        
+        $product = Product::factory()->create([
+            'tenant_id' => $user->tenant_id,
+        ]);
+        
+        $this->actingAs($user);
+        
+        $this->assertFalse(
+            Gate::allows('delete', $product)
+        );
+    }
+    
+    public function test_user_cannot_access_other_tenant_products()
+    {
+        $user = User::factory()->create();
+        $product = Product::factory()->create(); // Different tenant
+        
+        $this->actingAs($user);
+        
+        $this->assertFalse(
+            Gate::allows('view', $product)
+        );
+    }
+}
+```
+
+---
+
+## Role Permission Matrix
+
+| Permission              | Owner | GM  | Store Mgr | Asst Mgr | Sales | Cashier | Inv Clerk |
+|------------------------|-------|-----|-----------|----------|-------|---------|----------|
+| View Products          | ✓     | ✓   | ✓         | ✓        | ✓     | ✓       | ✓        |
+| Create Products        | ✓     | ✓   | ✓         | ✓        | ✗     | ✗       | ✗        |
+| Update Products        | ✓     | ✓   | ✓         | ✓        | ✗     | ✗       | ✗        |
+| Delete Products        | ✓     | ✓   | ✗         | ✗        | ✗     | ✗       | ✗        |
+| View Orders            | ✓     | ✓   | ✓         | ✓        | ✓     | ✗       | ✗        |
+| Create Orders          | ✓     | ✓   | ✓         | ✓        | ✓     | ✗       | ✗        |
+| Cancel Orders          | ✓     | ✓   | ✓         | ✗        | ✗     | ✗       | ✗        |
+| Refund Orders          | ✓     | ✓   | ✗         | ✗        | ✗     | ✗       | ✗        |
+| View Profits           | ✓     | ✓   | ✗         | ✗        | ✗     | ✗       | ✗        |
+| Approve Payroll        | ✓     | ✓   | ✗         | ✗        | ✗     | ✗       | ✗        |
+| Process POS Sales      | ✓     | ✓   | ✓         | ✓        | ✓     | ✓       | ✗        |
+| Manage Inventory       | ✓     | ✓   | ✓         | ✓        | ✗     | ✗       | ✓        |

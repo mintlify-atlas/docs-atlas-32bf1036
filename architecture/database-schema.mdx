@@ -1,0 +1,545 @@
+---
+title: Database Schema
+description: Complete reference for ShelfWise's database structure, relationships, and design patterns
+---
+
+## Overview
+
+ShelfWise uses a **PostgreSQL database** with a carefully designed schema that supports multi-tenancy, complex inventory management, payroll processing, and e-commerce operations. The schema follows Laravel conventions with additional patterns for tenant isolation and soft deletes.
+
+<Note>
+  All tenant-scoped tables include a `tenant_id` foreign key with cascade delete for automatic cleanup when a tenant is removed.
+</Note>
+
+## Core Domain Model
+
+```
+Tenant (Organization)
+├── User (staff members)
+├── Customer (e-commerce buyers - SEPARATE from User)
+├── Shop (physical/online stores)
+│   ├── Product → ProductVariant → StockMovement
+│   ├── Service → ServiceVariant
+│   ├── Order → OrderItem → OrderPayment
+│   └── StorefrontSettings
+├── Supplier → SupplierCatalog → PurchaseOrder
+└── Payroll
+    ├── PayRun → PayRunItem
+    ├── Payslip
+    ├── Timesheet
+    └── WageAdvance
+```
+
+## Tenants Table
+
+The root of multi-tenancy:
+
+```sql
+CREATE TABLE tenants (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) UNIQUE NOT NULL,
+    owner_email VARCHAR(255) NOT NULL,
+    business_type VARCHAR(255),
+    phone VARCHAR(255),
+    logo_path VARCHAR(255),
+    
+    -- Subscription management
+    subscription_plan VARCHAR(255) DEFAULT 'trial',
+    trial_ends_at TIMESTAMP,
+    subscription_ends_at TIMESTAMP,
+    
+    -- Resource limits
+    max_shops INTEGER DEFAULT 10,
+    max_users INTEGER DEFAULT 10,
+    max_products INTEGER DEFAULT 100,
+    
+    settings JSON,
+    is_active BOOLEAN DEFAULT true,
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    INDEX idx_tenants_slug (slug),
+    INDEX idx_tenants_is_active (is_active)
+);
+```
+
+<AccordionGroup>
+  <Accordion title="Subscription Plans">
+    - `trial` - Free trial period (default 14 days)
+    - `basic` - Basic subscription tier
+    - `premium` - Premium subscription tier
+    - `enterprise` - Enterprise custom pricing
+  </Accordion>
+
+  <Accordion title="Resource Limits">
+    Resource limits are enforced in the Tenant model:
+    
+    ```php
+    $tenant->hasReachedShopLimit();      // Check shop count
+    $tenant->hasReachedUserLimit();      // Check user count
+    $tenant->hasReachedProductLimit();   // Check product count
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Users Table
+
+Staff members who operate the system:
+
+```sql
+CREATE TABLE users (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT,
+    
+    first_name VARCHAR(255) NOT NULL,
+    last_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    
+    is_tenant_owner BOOLEAN DEFAULT false,
+    is_super_admin BOOLEAN DEFAULT false,
+    role VARCHAR(255) DEFAULT 'owner',
+    is_active BOOLEAN DEFAULT true,
+    
+    -- Onboarding
+    onboarding_status VARCHAR(255),
+    onboarded_at TIMESTAMP,
+    onboarded_by BIGINT,
+    
+    avatar_path VARCHAR(255),
+    date_of_birth DATE,
+    hire_date DATE,
+    
+    remember_token VARCHAR(100),
+    email_verified_at TIMESTAMP,
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (onboarded_by) REFERENCES users(id) ON DELETE SET NULL,
+    
+    UNIQUE (tenant_id, email),
+    INDEX idx_users_tenant_active (tenant_id, is_active),
+    INDEX idx_users_tenant_owner (tenant_id, is_tenant_owner)
+);
+```
+
+<Warning>
+  **Important**: Email is unique per tenant, NOT globally. This allows `user@example.com` to exist in multiple tenants.
+</Warning>
+
+### User-Shop Relationship
+
+Users can be assigned to specific shops:
+
+```sql
+CREATE TABLE shop_user (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    shop_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    
+    INDEX idx_shop_user_tenant (tenant_id),
+    INDEX idx_shop_user_shop (shop_id),
+    INDEX idx_shop_user_user (user_id)
+);
+```
+
+## Products & Inventory
+
+### Products Table
+
+```sql
+CREATE TABLE products (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    shop_id BIGINT NOT NULL,
+    template_id BIGINT,
+    product_type_id BIGINT NOT NULL,
+    category_id BIGINT,
+    
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    description TEXT,
+    custom_attributes JSON,
+    
+    has_variants BOOLEAN DEFAULT false,
+    is_active BOOLEAN DEFAULT true,
+    track_stock BOOLEAN DEFAULT true,
+    is_taxable BOOLEAN DEFAULT true,
+    is_featured BOOLEAN DEFAULT false,
+    display_order INTEGER,
+    
+    -- SEO
+    seo_title VARCHAR(255),
+    seo_description TEXT,
+    seo_keywords VARCHAR(255),
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE,
+    FOREIGN KEY (template_id) REFERENCES product_templates(id) ON DELETE SET NULL,
+    FOREIGN KEY (product_type_id) REFERENCES product_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (category_id) REFERENCES product_categories(id) ON DELETE SET NULL,
+    
+    INDEX idx_products_tenant_shop (tenant_id, shop_id),
+    INDEX idx_products_tenant_active (tenant_id, is_active),
+    INDEX idx_products_slug (tenant_id, slug)
+);
+```
+
+<Note>
+  Products use a **product-variant model**. A product can have multiple variants (sizes, colors) or be a simple product with one default variant.
+</Note>
+
+### Product Variants Table
+
+```sql
+CREATE TABLE product_variants (
+    id BIGSERIAL PRIMARY KEY,
+    product_id BIGINT NOT NULL,
+    
+    sku VARCHAR(255) NOT NULL,
+    barcode VARCHAR(255),
+    name VARCHAR(255),  -- e.g., "Large - Blue"
+    attributes JSON,     -- e.g., {"size": "L", "color": "Blue"}
+    
+    price DECIMAL(15, 2) NOT NULL,
+    cost_price DECIMAL(15, 2),
+    base_unit_name VARCHAR(255) DEFAULT 'Unit',
+    reorder_level INTEGER DEFAULT 0,
+    
+    -- Tracking fields
+    batch_number VARCHAR(255),
+    expiry_date DATE,
+    serial_number VARCHAR(255),
+    
+    image_url VARCHAR(255),
+    images JSON,
+    is_active BOOLEAN DEFAULT true,
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    
+    INDEX idx_product_variants_product (product_id),
+    INDEX idx_product_variants_sku (sku),
+    INDEX idx_product_variants_barcode (barcode)
+);
+```
+
+### Inventory Locations Table
+
+Tracks stock quantities at different locations:
+
+```sql
+CREATE TABLE inventory_locations (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    product_variant_id BIGINT NOT NULL,
+    
+    location_type VARCHAR(255) NOT NULL,  -- 'App\\Models\\Shop', 'App\\Models\\Warehouse'
+    location_id BIGINT NOT NULL,
+    
+    quantity INTEGER DEFAULT 0,
+    reserved_quantity INTEGER DEFAULT 0,  -- Reserved for confirmed orders
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE,
+    
+    INDEX idx_inventory_tenant_variant (tenant_id, product_variant_id),
+    INDEX idx_inventory_location (location_type, location_id),
+    
+    CHECK (reserved_quantity <= quantity)
+);
+```
+
+<Warning>
+  **Critical**: `reserved_quantity` tracks stock reserved for confirmed orders. Available stock = `quantity - reserved_quantity`. Always use `lockForUpdate()` when modifying these values.
+</Warning>
+
+### Stock Movements Table
+
+Audit trail for all inventory changes:
+
+```sql
+CREATE TABLE stock_movements (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    product_variant_id BIGINT,
+    inventory_location_id BIGINT NOT NULL,
+    
+    type VARCHAR(255) NOT NULL,  -- 'purchase', 'sale', 'adjustment', 'transfer', 'return'
+    quantity INTEGER NOT NULL,
+    previous_quantity INTEGER NOT NULL,
+    new_quantity INTEGER NOT NULL,
+    
+    reference_type VARCHAR(255),  -- 'App\\Models\\Order', 'App\\Models\\PurchaseOrder'
+    reference_id BIGINT,
+    reference_number VARCHAR(255),
+    
+    reason TEXT,
+    performed_by BIGINT NOT NULL,
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE SET NULL,
+    FOREIGN KEY (inventory_location_id) REFERENCES inventory_locations(id) ON DELETE CASCADE,
+    FOREIGN KEY (performed_by) REFERENCES users(id) ON DELETE RESTRICT,
+    
+    INDEX idx_stock_movements_tenant_variant (tenant_id, product_variant_id),
+    INDEX idx_stock_movements_location (inventory_location_id),
+    INDEX idx_stock_movements_reference (reference_type, reference_id)
+);
+```
+
+## Orders & Sales
+
+### Orders Table
+
+```sql
+CREATE TABLE orders (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    shop_id BIGINT NOT NULL,
+    customer_id BIGINT,  -- FK to users table (customer accounts)
+    
+    order_number VARCHAR(255) UNIQUE NOT NULL,
+    order_type VARCHAR(255) DEFAULT 'online',  -- 'online', 'pos', 'wholesale'
+    
+    status VARCHAR(255) DEFAULT 'pending',
+    payment_status VARCHAR(255) DEFAULT 'unpaid',
+    payment_method VARCHAR(255),
+    payment_reference VARCHAR(255),
+    
+    -- Amounts
+    subtotal DECIMAL(15, 2) DEFAULT 0,
+    tax_amount DECIMAL(15, 2) DEFAULT 0,
+    discount_amount DECIMAL(15, 2) DEFAULT 0,
+    shipping_cost DECIMAL(15, 2) DEFAULT 0,
+    total_amount DECIMAL(15, 2) DEFAULT 0,
+    paid_amount DECIMAL(15, 2) DEFAULT 0,
+    
+    -- Refund tracking
+    refunded_amount DECIMAL(15, 2) DEFAULT 0,
+    refund_reason TEXT,
+    refunded_at TIMESTAMP,
+    refunded_by BIGINT,
+    
+    -- Notes & addresses
+    customer_notes TEXT,
+    internal_notes TEXT,
+    shipping_address TEXT,
+    billing_address TEXT,
+    
+    -- Lifecycle timestamps
+    confirmed_at TIMESTAMP,
+    packed_at TIMESTAMP,
+    packed_by BIGINT,
+    shipped_at TIMESTAMP,
+    shipped_by BIGINT,
+    delivered_at TIMESTAMP,
+    delivered_by BIGINT,
+    cancelled_at TIMESTAMP,
+    cancellation_reason TEXT,
+    
+    -- Shipping
+    tracking_number VARCHAR(255),
+    shipping_carrier VARCHAR(255),
+    
+    -- POS specific
+    offline_id VARCHAR(255),  -- For offline-first POS
+    
+    created_by BIGINT NOT NULL,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE,
+    FOREIGN KEY (customer_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    
+    INDEX idx_orders_tenant_shop (tenant_id, shop_id),
+    INDEX idx_orders_tenant_status (tenant_id, status),
+    INDEX idx_orders_tenant_payment (tenant_id, payment_status),
+    INDEX idx_orders_customer (customer_id),
+    INDEX idx_orders_number (order_number)
+);
+```
+
+### Order Items Table
+
+```sql
+CREATE TABLE order_items (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL,
+    
+    -- Polymorphic sellable (Product or Service)
+    sellable_type VARCHAR(255) NOT NULL,
+    sellable_id BIGINT NOT NULL,
+    
+    -- Product-specific
+    product_variant_id BIGINT,
+    product_packaging_type_id BIGINT,
+    packaging_description VARCHAR(255),
+    
+    quantity INTEGER NOT NULL,
+    unit_price DECIMAL(15, 2) NOT NULL,
+    discount_amount DECIMAL(15, 2) DEFAULT 0,
+    tax_amount DECIMAL(15, 2) DEFAULT 0,
+    
+    metadata JSON,  -- Service addons, custom options
+    
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP,
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE SET NULL,
+    FOREIGN KEY (product_packaging_type_id) REFERENCES product_packaging_types(id) ON DELETE SET NULL,
+    
+    INDEX idx_order_items_tenant_order (tenant_id, order_id),
+    INDEX idx_order_items_sellable (sellable_type, sellable_id)
+);
+```
+
+<Note>
+  Order items use **polymorphic relationships** to support both products and services. The `sellable_type` and `sellable_id` columns point to either `ProductVariant` or `ServiceVariant`.
+</Note>
+
+## Indexing Strategy
+
+### Composite Indexes
+
+All tenant-scoped queries benefit from composite indexes with `tenant_id` first:
+
+```sql
+-- Optimal for: SELECT * FROM products WHERE tenant_id = ? AND shop_id = ?
+INDEX idx_products_tenant_shop (tenant_id, shop_id)
+
+-- Optimal for: SELECT * FROM orders WHERE tenant_id = ? AND status = ?
+INDEX idx_orders_tenant_status (tenant_id, status)
+```
+
+### Performance Patterns
+
+<AccordionGroup>
+  <Accordion title="Tenant-First Indexing">
+    Always put `tenant_id` first in composite indexes since every query filters by tenant:
+
+    ```sql
+    -- Good
+    INDEX (tenant_id, shop_id, created_at)
+    
+    -- Bad
+    INDEX (shop_id, tenant_id, created_at)
+    ```
+  </Accordion>
+
+  <Accordion title="Foreign Key Indexes">
+    Laravel doesn't automatically create indexes on foreign keys. Always add them:
+
+    ```php
+    $table->foreignIdFor(Tenant::class)->constrained()->cascadeOnDelete();
+    $table->index('tenant_id');  // Explicitly add index
+    ```
+  </Accordion>
+
+  <Accordion title="Soft Delete Queries">
+    Add `deleted_at IS NULL` to frequently-used queries:
+
+    ```sql
+    INDEX idx_products_active (tenant_id, is_active, deleted_at)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Cascade Delete Strategy
+
+### When Tenant is Deleted
+
+All tenant-scoped data is automatically deleted:
+
+```sql
+FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+```
+
+This cascades to:
+- All users
+- All shops
+- All products and variants
+- All orders and order items
+- All inventory locations and stock movements
+- All payroll data
+
+### When User is Deleted
+
+```sql
+-- Preserve audit trail
+FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+
+-- Optional relationships
+FOREIGN KEY (customer_id) REFERENCES users(id) ON DELETE SET NULL
+```
+
+## UUID vs Auto-Increment
+
+<Warning>
+  Despite the documentation mentioning UUIDs, the actual implementation uses **auto-incrementing BigInt IDs**. This is visible in all migration files and provides better performance for joins and indexes.
+</Warning>
+
+```php
+// Current implementation
+$table->id();  // Auto-incrementing BigInt
+
+// Not using
+$table->uuid('id')->primary();  // UUID primary key
+```
+
+## Soft Deletes vs is_active
+
+Many models use BOTH soft deletes and `is_active` flags:
+
+```sql
+deleted_at TIMESTAMP,
+is_active BOOLEAN DEFAULT true,
+```
+
+| State    | is_active | deleted_at | Use Case                           |
+|----------|-----------|------------|------------------------------------|
+| Active   | true      | null       | Fully visible and operational      |
+| Inactive | false     | null       | Hidden from sales, visible in admin|
+| Deleted  | N/A       | timestamp  | Completely hidden, can be restored |
+
+## Related Documentation
+
+- [Multi-Tenancy](/architecture/multi-tenancy) - How tenant isolation is enforced
+- [Service Layer](/architecture/service-layer) - Business logic that interacts with this schema
+- [Authorization](/architecture/authorization) - User roles and permissions

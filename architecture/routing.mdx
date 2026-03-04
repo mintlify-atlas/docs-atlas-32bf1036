@@ -1,0 +1,481 @@
+---
+title: "Routing with Wayfinder"
+description: "Type-safe routing in ShelfWise using Laravel Wayfinder for automatic route generation"
+---
+
+## Overview
+
+ShelfWise uses **Wayfinder** to generate type-safe route actions from Laravel routes. This eliminates hardcoded URLs and provides autocomplete for routes in TypeScript.
+
+## How Wayfinder Works
+
+Wayfinder scans your Laravel routes and generates TypeScript action files that mirror your controller structure:
+
+```
+Laravel Routes (web.php)          →    TypeScript Actions
+─────────────────────────────────────────────────────────
+Route::resource('products',       →    ProductController.ts
+    ProductController::class);          - index.url()
+                                         - create.url()
+                                         - store.url()
+                                         - show.url(id)
+                                         - edit.url(id)
+                                         - update.url(id)
+                                         - destroy.url(id)
+```
+
+## Laravel Route Definitions
+
+Routes are defined in `routes/web.php` using standard Laravel syntax:
+
+```php
+use App\Http\Controllers\ProductController;
+use App\Http\Controllers\OrderController;
+use Illuminate\Support\Facades\Route;
+
+// Resource routes (CRUD)
+Route::resource('products', ProductController::class);
+Route::resource('orders', OrderController::class);
+
+// Custom routes with route names
+Route::prefix('shops/{shop}/stock-take')
+    ->name('shops.stock-take.')
+    ->group(function () {
+        Route::get('/', [StockTakeController::class, 'index'])->name('index');
+        Route::post('/', [StockTakeController::class, 'store'])->name('store');
+    });
+
+// Nested resource routes
+Route::prefix('orders/{order}')
+    ->name('orders.')
+    ->group(function () {
+        Route::post('/payments', [OrderPaymentController::class, 'store'])
+            ->name('payments.store');
+        Route::delete('/payments/{payment}', [OrderPaymentController::class, 'destroy'])
+            ->name('payments.destroy');
+    });
+```
+
+<Note>
+**Important**: Always name your routes using `->name()` or the `->name()` prefix on route groups. Wayfinder requires named routes to generate actions.
+</Note>
+
+## Using Routes in React
+
+### Basic Navigation
+
+Import the controller action and use the `.url()` method:
+
+```typescript
+import { Link } from '@inertiajs/react';
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+
+// List page
+<Link href={ProductController.index.url()}>
+    View All Products
+</Link>
+
+// Create page
+<Link href={ProductController.create.url()}>
+    Create New Product
+</Link>
+
+// Show page (with parameter)
+<Link href={ProductController.show.url(product.id)}>
+    View Product
+</Link>
+
+// Edit page (with parameter)
+<Link href={ProductController.edit.url(product.id)}>
+    Edit Product
+</Link>
+```
+
+### Form Actions
+
+Use Wayfinder actions in Inertia forms:
+
+```typescript
+import { Form } from '@inertiajs/react';
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+
+// Create form
+<Form
+    action={ProductController.store.url()}
+    method="post"
+>
+    <Input name="name" />
+    <Button type="submit">Create</Button>
+</Form>
+
+// Update form
+<Form
+    action={ProductController.update.url(product.id)}
+    method="put"
+>
+    <Input name="name" defaultValue={product.name} />
+    <Button type="submit">Update</Button>
+</Form>
+
+// Delete form
+<Form
+    action={ProductController.destroy.url(product.id)}
+    method="delete"
+    onSubmit={(e) => {
+        if (!confirm('Are you sure?')) {
+            e.preventDefault();
+        }
+    }}
+>
+    <Button type="submit" variant="danger">Delete</Button>
+</Form>
+```
+
+### Programmatic Navigation
+
+Use the `router` with Wayfinder actions:
+
+```typescript
+import { router } from '@inertiajs/react';
+import OrderController from '@/actions/App/Http/Controllers/OrderController';
+
+const handleCreateOrder = (orderData: OrderFormData) => {
+    router.post(
+        OrderController.store.url(),
+        orderData,
+        {
+            onSuccess: () => {
+                toast.success('Order created successfully');
+                router.visit(OrderController.index.url());
+            },
+            onError: (errors) => {
+                toast.error('Validation failed');
+            },
+        }
+    );
+};
+
+const handleDeleteProduct = (productId: string) => {
+    if (confirm('Are you sure?')) {
+        router.delete(
+            ProductController.destroy.url(productId),
+            {
+                onSuccess: () => {
+                    toast.success('Product deleted');
+                },
+            }
+        );
+    }
+};
+```
+
+## Route Parameters
+
+### Single Parameter
+
+Pass route parameters as arguments to `.url()`:
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+
+// Show product with ID
+const productUrl = ProductController.show.url(product.id);
+// Result: /products/123e4567-e89b-12d3-a456-426614174000
+
+// Edit product
+const editUrl = ProductController.edit.url(product.id);
+// Result: /products/123e4567-e89b-12d3-a456-426614174000/edit
+```
+
+### Multiple Parameters
+
+For nested routes, pass parameters in order:
+
+```typescript
+import StockTakeController from '@/actions/App/Http/Controllers/StockTakeController';
+import OrderPaymentController from '@/actions/App/Http/Controllers/OrderPaymentController';
+
+// Shop's stock-take page
+const stockTakeUrl = StockTakeController.index.url(shop.id);
+// Result: /shops/shop-uuid/stock-take
+
+// Delete order payment
+const deleteUrl = OrderPaymentController.destroy.url(order.id, payment.id);
+// Result: /orders/order-uuid/payments/payment-uuid
+```
+
+### Query Parameters
+
+Add query parameters as an options object:
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+import { router } from '@inertiajs/react';
+
+// Navigate with filters
+router.get(
+    ProductController.index.url(),
+    {
+        category: 'electronics',
+        status: 'active',
+        page: 2,
+    },
+    {
+        preserveState: true,
+        preserveScroll: true,
+    }
+);
+// Result: /products?category=electronics&status=active&page=2
+```
+
+## Common Routing Patterns
+
+### Dashboard with Tabs
+
+```typescript
+import DashboardController from '@/actions/App/Http/Controllers/DashboardController';
+import { router } from '@inertiajs/react';
+
+const handleTabChange = (tab: string) => {
+    router.get(
+        DashboardController.index.url(),
+        { tab, period, shop: selectedShop },
+        { preserveState: true, preserveScroll: true }
+    );
+};
+
+<TabTrigger
+    isActive={activeTab === 'sales'}
+    onClick={() => handleTabChange('sales')}
+>
+    Sales
+</TabTrigger>
+```
+
+### Index with Filters
+
+```typescript
+import OrderController from '@/actions/App/Http/Controllers/OrderController';
+import { router } from '@inertiajs/react';
+
+const handleFilterChange = (filters: OrderFilters) => {
+    router.get(
+        OrderController.index.url(),
+        {
+            status: filters.status,
+            payment_status: filters.paymentStatus,
+            from_date: filters.fromDate,
+            to_date: filters.toDate,
+        },
+        {
+            preserveState: true,
+            preserveScroll: true,
+            only: ['orders'], // Only reload orders prop
+        }
+    );
+};
+```
+
+### Pagination
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+import { router } from '@inertiajs/react';
+
+const handlePageChange = (page: number) => {
+    router.get(
+        ProductController.index.url(),
+        { page, ...currentFilters },
+        { preserveState: true, preserveScroll: true }
+    );
+};
+
+<Pagination
+    currentPage={products.current_page}
+    totalPages={products.last_page}
+    onPageChange={handlePageChange}
+/>
+```
+
+### Nested Resource Actions
+
+```typescript
+import OrderController from '@/actions/App/Http/Controllers/OrderController';
+import OrderPaymentController from '@/actions/App/Http/Controllers/OrderPaymentController';
+import { Form } from '@inertiajs/react';
+
+// Record a payment for an order
+<Form
+    action={OrderPaymentController.store.url(order.id)}
+    method="post"
+>
+    <Input name="amount" type="number" />
+    <Select name="payment_method" options={paymentMethods} />
+    <Button type="submit">Record Payment</Button>
+</Form>
+
+// Update order status
+<Form
+    action={OrderController.updateStatus.url(order.id)}
+    method="post"
+>
+    <Select name="status" options={orderStatuses} />
+    <Button type="submit">Update Status</Button>
+</Form>
+```
+
+## Advanced Patterns
+
+### Conditional Navigation
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+import { router } from '@inertiajs/react';
+
+const handleSave = (product: Product, redirectToList: boolean) => {
+    router.put(
+        ProductController.update.url(product.id),
+        productData,
+        {
+            onSuccess: () => {
+                toast.success('Product updated');
+                
+                if (redirectToList) {
+                    router.visit(ProductController.index.url());
+                } else {
+                    router.visit(ProductController.show.url(product.id));
+                }
+            },
+        }
+    );
+};
+```
+
+### Chained Requests
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+import StockMovementController from '@/actions/App/Http/Controllers/StockMovementController';
+import { router } from '@inertiajs/react';
+
+const createProductWithStock = async (data: ProductFormData) => {
+    // Create product first
+    router.post(
+        ProductController.store.url(),
+        data.product,
+        {
+            onSuccess: (response) => {
+                const productId = response.props.product.id;
+                
+                // Then set up initial stock
+                router.post(
+                    StockMovementController.setupLocations.url(productId),
+                    data.inventory,
+                    {
+                        onSuccess: () => {
+                            toast.success('Product created with inventory');
+                            router.visit(ProductController.show.url(productId));
+                        },
+                    }
+                );
+            },
+        }
+    );
+};
+```
+
+### Modal Navigation
+
+```typescript
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+import { useState } from 'react';
+import { Link } from '@inertiajs/react';
+
+const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
+<div className="grid grid-cols-3 gap-4">
+    {products.map(product => (
+        <Card
+            key={product.id}
+            onClick={() => setSelectedProduct(product)}
+        >
+            {product.name}
+        </Card>
+    ))}
+</div>
+
+{selectedProduct && (
+    <Modal
+        isOpen={!!selectedProduct}
+        onClose={() => setSelectedProduct(null)}
+    >
+        <ModalHeader>
+            <h2>{selectedProduct.name}</h2>
+        </ModalHeader>
+        <ModalBody>
+            {/* Product details */}
+        </ModalBody>
+        <ModalFooter>
+            <Link href={ProductController.edit.url(selectedProduct.id)}>
+                <Button>Edit Product</Button>
+            </Link>
+        </ModalFooter>
+    </Modal>
+)}
+```
+
+## Best Practices
+
+<Note>
+1. **Never hardcode URLs** - Always use Wayfinder actions
+2. **Name all routes** - Wayfinder requires named routes
+3. **Use preserveState for filters** - Maintain client state during navigation
+4. **Type route parameters** - Use TypeScript interfaces for complex params
+5. **Handle navigation errors** - Always provide `onError` callbacks
+</Note>
+
+## Controller Action Reference
+
+Common controller actions available:
+
+```typescript
+// Resource routes (all controllers)
+Controller.index.url()           // GET /resource
+Controller.create.url()          // GET /resource/create
+Controller.store.url()           // POST /resource
+Controller.show.url(id)          // GET /resource/{id}
+Controller.edit.url(id)          // GET /resource/{id}/edit
+Controller.update.url(id)        // PUT/PATCH /resource/{id}
+Controller.destroy.url(id)       // DELETE /resource/{id}
+
+// Common custom actions
+Controller.updateStatus.url(id)         // POST /resource/{id}/status
+Controller.toggleActive.url(id)         // POST /resource/{id}/toggle-active
+Controller.export.url()                 // GET /resource/export
+Controller.import.url()                 // POST /resource/import
+```
+
+## Troubleshooting
+
+### Route Not Found
+
+If a Wayfinder action doesn't exist:
+
+1. Check that the route is defined in `routes/web.php`
+2. Ensure the route has a name using `->name()`
+3. Run `php artisan route:list` to verify the route exists
+4. Regenerate Wayfinder actions (if applicable)
+
+### Type Errors
+
+If TypeScript shows errors on route parameters:
+
+1. Check the parameter order matches the route definition
+2. Ensure UUIDs are passed as strings, not numbers
+3. Verify the controller action exists in the generated file
+
+## See Also
+
+- [Inertia.js + React Setup](/architecture/inertia-react) - Navigation patterns
+- [Component Library](/architecture/components) - Link and Button components
+- [State Management](/architecture/state-management) - State preservation during navigation

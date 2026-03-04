@@ -1,80 +1,196 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get ShelfWise up and running in under 5 minutes"
 ---
 
-## Get started in three steps
+ShelfWise is a full-featured inventory management system built with Laravel 12, React, and Inertia.js. This guide will help you set up a local development environment quickly.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, ensure you have the following installed:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- PHP 8.2 or higher
+- Composer
+- Node.js 18+ and npm
+- SQLite (default) or MySQL/PostgreSQL
 
-### Step 2: Deploy your changes
+## Installation
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/shelfwise.git
+    cd shelfwise
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Install PHP dependencies">
+    ```bash
+    composer install
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    This installs Laravel 12, Inertia.js, Laravel Fortify for authentication, and other backend dependencies.
+  </Step>
 
-### Step 3: Go live
+  <Step title="Install JavaScript dependencies">
+    ```bash
+    npm install
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    This installs React 19, TypeScript, TailwindCSS 4, and frontend build tools.
+  </Step>
 
-## Next steps
+  <Step title="Set up environment">
+    Copy the example environment file and generate an application key:
 
-Now that you have your docs running, explore these key features:
+    ```bash
+    cp .env.example .env
+    php artisan key:generate
+    ```
+  </Step>
+
+  <Step title="Create database">
+    ShelfWise uses SQLite by default. Create the database file:
+
+    ```bash
+    touch database/database.sqlite
+    ```
+
+    <Note>
+      To use MySQL or PostgreSQL instead, update the `DB_CONNECTION` and related settings in your `.env` file.
+    </Note>
+  </Step>
+
+  <Step title="Run migrations">
+    Set up the database schema:
+
+    ```bash
+    php artisan migrate
+    ```
+
+    This creates tables for tenants, users, shops, products, orders, and more.
+  </Step>
+
+  <Step title="Start the development server">
+    ```bash
+    composer dev
+    ```
+
+    This command starts three concurrent processes:
+    - Laravel development server (http://localhost:8000)
+    - Queue worker for background jobs
+    - Vite dev server for hot module replacement
+
+    <Info>
+      The `composer dev` script uses `concurrently` to run multiple processes. You can also run them separately in different terminals if needed.
+    </Info>
+  </Step>
+</Steps>
+
+## Access the Application
+
+Once the development server is running, open your browser to:
+
+```
+http://localhost:8000
+```
+
+You'll be greeted with the onboarding flow to create your first tenant account.
+
+## Create Your First Tenant
+
+ShelfWise is a multi-tenant application. Each business operates as a separate tenant with isolated data.
+
+<Steps>
+  <Step title="Register as tenant owner">
+    Fill in your business details:
+    - Business name
+    - Owner email
+    - Password
+    - Business type (retail, wholesale, etc.)
+  </Step>
+
+  <Step title="Set up your first shop">
+    After registration, you'll create your first shop location:
+    - Shop name
+    - Shop type (retail store, warehouse, etc.)
+    - Currency settings
+    - Tax/VAT configuration
+  </Step>
+
+  <Step title="Start adding inventory">
+    You're ready to:
+    - Add products and variants
+    - Create purchase orders
+    - Process sales orders
+    - Track stock movements
+  </Step>
+</Steps>
+
+## Quick Commands Reference
+
+<CodeGroup>
+```bash Development
+# Start all services (recommended)
+composer dev
+
+# Or start individually
+php artisan serve
+php artisan queue:listen
+npm run dev
+```
+
+```bash Testing
+# Run PHP tests
+composer test
+# or
+php artisan test
+
+# Type check TypeScript
+npm run types
+```
+
+```bash Code Quality
+# Format PHP code
+vendor/bin/pint
+
+# Lint and fix JavaScript
+npm run lint
+
+# Format frontend code
+npm run format
+```
+</CodeGroup>
+
+## What's Next?
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Complete Setup" icon="gear" href="/setup/installation">
+    Detailed installation instructions including database options and troubleshooting
+  </Card>
+  
+  <Card title="Configuration" icon="sliders" href="/setup/configuration">
+    Configure mail, queues, storage, and other application settings
+  </Card>
+  
+  <Card title="Multi-Tenancy" icon="users" href="/setup/multi-tenancy">
+    Understand how ShelfWise handles tenant isolation and data security
+  </Card>
+  
+  <Card title="API Documentation" icon="code" href="/api/services">
+    Explore the service layer API for integrations
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+<Warning>
+  **Important for Production**: The quickstart uses SQLite and default settings suitable for development only. See the [Installation Guide](/setup/installation) for production deployment.
+</Warning>
+
+## Need Help?
+
+If you encounter issues:
+
+- Check the [Installation Guide](/setup/installation#troubleshooting) for common problems
+- Review Laravel logs in `storage/logs/laravel.log`
+- Ensure all system requirements are met
+- Join our community for support

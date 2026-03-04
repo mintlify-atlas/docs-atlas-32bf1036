@@ -1,0 +1,422 @@
+---
+title: "Inertia.js + React Setup"
+description: "Learn how ShelfWise uses Inertia.js with React for a modern, server-side rendered SPA experience"
+---
+
+## Overview
+
+ShelfWise uses **Inertia.js** as a bridge between Laravel and React, eliminating the need for a separate API while maintaining a modern single-page application experience. This architecture provides server-side routing with client-side rendering.
+
+## Core Architecture
+
+### Application Entry Point
+
+The application bootstraps in `resources/js/app.tsx` with multiple provider layers:
+
+```typescript
+import { createInertiaApp } from '@inertiajs/react';
+import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
+import { createRoot } from 'react-dom/client';
+
+createInertiaApp({
+    title: (title) => (title ? `${title} - ${appName}` : appName),
+    resolve: (name) =>
+        resolvePageComponent(
+            `./pages/${name}.tsx`,
+            import.meta.glob('./pages/**/*.tsx'),
+        ),
+    setup({ el, App, props }) {
+        const root = createRoot(el);
+
+        root.render(
+            <ErrorBoundary
+                onError={handleGlobalError}
+                fallbackRender={ChunkLoadErrorFallback}
+            >
+                <ErrorProvider>
+                    <ThemeProvider>
+                        <ToastProvider>
+                            <App {...props} />
+                        </ToastProvider>
+                    </ThemeProvider>
+                </ErrorProvider>
+            </ErrorBoundary>,
+        );
+    },
+    progress: {
+        color: '#4B5563',
+    },
+});
+```
+
+### Provider Stack
+
+The application uses a layered provider architecture:
+
+1. **ErrorBoundary** - Catches React errors globally with specialized handlers for chunk loading failures
+2. **ErrorProvider** - Application-level error reporting and logging
+3. **ThemeProvider** - Dark mode support with system preference detection
+4. **ToastProvider** - Global notification system for user feedback
+
+<Note>
+The provider order matters! ErrorBoundary must be the outermost layer to catch errors from all child providers.
+</Note>
+
+## Page Components
+
+### Page Structure
+
+Inertia pages are React components located in `resources/js/pages/` that receive props from Laravel controllers:
+
+```typescript
+import { Head } from '@inertiajs/react';
+import AppLayout from '@/layouts/AppLayout';
+import { Product } from '@/types/product';
+
+interface Props {
+    products: {
+        data: Product[];
+        total: number;
+    };
+}
+
+export default function Index({ products }: Props) {
+    return (
+        <>
+            <Head title="Products" />
+            
+            <div className="space-y-6">
+                <h1 className="text-2xl font-bold">Products</h1>
+                {/* Page content */}
+            </div>
+        </>
+    );
+}
+
+Index.layout = (page: React.ReactNode) => <AppLayout>{page}</AppLayout>;
+```
+
+### Layout Assignment
+
+Layouts are assigned using the static `layout` property on page components:
+
+<Tabs>
+  <Tab title="Standard Layout">
+    ```typescript
+    import AppLayout from '@/layouts/AppLayout';
+
+    export default function Dashboard({ metrics }: Props) {
+        return <div>Dashboard Content</div>;
+    }
+
+    Dashboard.layout = (page: React.ReactNode) => <AppLayout>{page}</AppLayout>;
+    ```
+  </Tab>
+  
+  <Tab title="Guest Layout">
+    ```typescript
+    import GuestLayout from '@/layouts/GuestLayout';
+
+    export default function Login() {
+        return <div>Login Form</div>;
+    }
+
+    Login.layout = (page: React.ReactNode) => <GuestLayout>{page}</GuestLayout>;
+    ```
+  </Tab>
+  
+  <Tab title="Storefront Layout">
+    ```typescript
+    import StorefrontLayout from '@/layouts/StorefrontLayout';
+
+    export default function ProductDetail({ product }: Props) {
+        return <div>Product Details</div>;
+    }
+
+    ProductDetail.layout = (page: React.ReactNode) => (
+        <StorefrontLayout>{page}</StorefrontLayout>
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Navigation & Links
+
+### Client-Side Navigation
+
+Use Inertia's `Link` component for client-side navigation without full page reloads:
+
+```typescript
+import { Link } from '@inertiajs/react';
+
+<Link 
+    href="/products/create"
+    className="btn btn-primary"
+>
+    Create Product
+</Link>
+```
+
+### Programmatic Navigation
+
+Use the `router` object for programmatic navigation with options:
+
+```typescript
+import { router } from '@inertiajs/react';
+
+// GET request with query parameters
+router.get('/dashboard', {
+    tab: 'sales',
+    period: 'month'
+}, {
+    preserveState: true,
+    preserveScroll: true,
+});
+
+// POST request
+router.post('/orders', orderData, {
+    onSuccess: () => {
+        toast.success('Order created successfully');
+    },
+    onError: (errors) => {
+        console.error('Validation errors:', errors);
+    }
+});
+
+// DELETE request
+router.delete(`/products/${productId}`, {
+    onBefore: () => confirm('Are you sure?'),
+    onSuccess: () => router.visit('/products'),
+});
+```
+
+<Note>
+The `preserveState` and `preserveScroll` options maintain the client-side state and scroll position during navigation.
+</Note>
+
+## Forms with Inertia
+
+### Simple Forms
+
+For basic forms, use Inertia's `Form` component with Wayfinder routes:
+
+```typescript
+import { Form } from '@inertiajs/react';
+import ProductController from '@/actions/App/Http/Controllers/ProductController';
+
+<Form
+    action={ProductController.store.url()}
+    method="post"
+    encType="multipart/form-data"
+>
+    <Input name="name" label="Product Name" required />
+    <TextArea name="description" label="Description" />
+    <Button type="submit">Create Product</Button>
+</Form>
+```
+
+### Complex Forms with useForm
+
+For forms requiring client-side state management, use the `useForm` hook:
+
+```typescript
+import { useForm } from '@inertiajs/react';
+
+interface OrderFormData {
+    customer_id: string;
+    items: OrderItem[];
+    payment_method: string;
+}
+
+export default function CreateOrder() {
+    const { data, setData, post, processing, errors } = useForm<OrderFormData>({
+        customer_id: '',
+        items: [],
+        payment_method: 'cash',
+    });
+
+    const handleSubmit = (e: FormEvent) => {
+        e.preventDefault();
+        post('/orders', {
+            onSuccess: () => {
+                toast.success('Order created');
+            },
+        });
+    };
+
+    return (
+        <form onSubmit={handleSubmit}>
+            <Select
+                value={data.customer_id}
+                onChange={(value) => setData('customer_id', value)}
+                options={customers}
+            />
+            
+            {errors.customer_id && (
+                <InputError message={errors.customer_id} />
+            )}
+            
+            <Button type="submit" disabled={processing}>
+                {processing ? 'Creating...' : 'Create Order'}
+            </Button>
+        </form>
+    );
+}
+```
+
+<Note>
+**Convention**: Use the `<Form>` component for simple forms. Only use `useForm` hook when you need client-side state management for complex interactions.
+</Note>
+
+## Data Fetching
+
+### Server Props
+
+Inertia automatically passes data from Laravel controllers as props:
+
+```php
+// Laravel Controller
+public function index()
+{
+    return Inertia::render('Products/Index', [
+        'products' => $this->productService->getAllProducts(),
+        'categories' => ProductCategory::query()->get(),
+    ]);
+}
+```
+
+```typescript
+// React Page Component
+interface Props {
+    products: ProductListResponse;
+    categories: ProductCategory[];
+}
+
+export default function Index({ products, categories }: Props) {
+    // Use the data directly - no loading states needed!
+    return <div>{products.data.map(product => ...)}</div>;
+}
+```
+
+### Shared Data
+
+Globally shared data (like authenticated user) is available via the `usePage` hook:
+
+```typescript
+import { usePage } from '@inertiajs/react';
+
+interface SharedProps {
+    auth: {
+        user: User;
+    };
+    flash: {
+        success?: string;
+        error?: string;
+    };
+}
+
+export default function Header() {
+    const { auth, flash } = usePage<SharedProps>().props;
+    
+    return (
+        <div>
+            <p>Welcome, {auth.user.name}</p>
+            {flash.success && <Alert>{flash.success}</Alert>}
+        </div>
+    );
+}
+```
+
+## Performance Optimizations
+
+### Partial Reloads
+
+Only reload specific props to reduce data transfer:
+
+```typescript
+router.reload({
+    only: ['orders'],
+    preserveScroll: true,
+});
+```
+
+### Progress Indicators
+
+The global progress bar is automatically shown for navigation events. Configure it in `app.tsx`:
+
+```typescript
+createInertiaApp({
+    // ...
+    progress: {
+        color: '#4B5563',
+        showSpinner: true,
+    },
+});
+```
+
+### Code Splitting
+
+Inertia automatically code-splits pages using dynamic imports. The ErrorBoundary includes a specialized handler for chunk loading failures:
+
+```typescript
+if (isChunkLoadError(error)) {
+    return (
+        <ChunkLoadErrorFallback
+            error={error}
+            resetError={resetError}
+            isResetting={isResetting}
+        />
+    );
+}
+```
+
+## Error Handling
+
+### Validation Errors
+
+Validation errors from Laravel are automatically available in the `errors` object:
+
+```typescript
+const { data, setData, post, errors } = useForm({...});
+
+return (
+    <>
+        <Input
+            name="email"
+            value={data.email}
+            onChange={(e) => setData('email', e.target.value)}
+        />
+        {errors.email && <InputError message={errors.email} />}
+    </>
+);
+```
+
+### Global Error Handling
+
+The ErrorBoundary catches unhandled errors and displays appropriate fallback UI:
+
+```typescript
+const handleGlobalError = (error: Error, errorInfo: React.ErrorInfo) => {
+    if (import.meta.env.DEV) {
+        console.error('[App] Unhandled error:', error);
+        console.error('[App] Component stack:', errorInfo.componentStack);
+    }
+    // TODO: Send to error tracking service (Sentry, etc.)
+};
+```
+
+## Best Practices
+
+<Note>
+1. **Always type your props** - Create TypeScript interfaces for page props
+2. **Use Wayfinder routes** - Never hardcode URLs, use controller actions
+3. **Preserve state when appropriate** - Use `preserveState: true` for filters/pagination
+4. **Keep pages thin** - Extract complex logic to custom hooks or lib functions
+5. **Handle loading states** - Show feedback during `processing` state
+</Note>
+
+## See Also
+
+- [Component Library](/architecture/components) - Reusable UI components
+- [Routing with Wayfinder](/architecture/routing) - Type-safe routing
+- [State Management](/architecture/state-management) - Client-side state patterns

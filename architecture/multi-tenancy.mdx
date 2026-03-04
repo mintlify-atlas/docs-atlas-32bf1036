@@ -1,0 +1,453 @@
+---
+title: Multi-Tenancy Architecture
+description: Understand how ShelfWise implements complete tenant isolation to ensure data security and privacy across organizations
+---
+
+## Overview
+
+ShelfWise is a **multi-tenant SaaS application** where multiple organizations (tenants) share the same application instance while maintaining complete data isolation. Every database query is automatically scoped to the authenticated user's tenant.
+
+<Warning>
+  **CRITICAL**: Tenant isolation is the most important security feature. Every database query MUST filter by `tenant_id` to prevent data leaks between organizations.
+</Warning>
+
+## Architecture Design
+
+### Single Database, Shared Schema
+
+ShelfWise uses a single database with a `tenant_id` column on all tenant-scoped tables:
+
+```
+Database: shelfwise
+├── tenants (tenant definitions)
+├── users (tenant_id FK)
+├── shops (tenant_id FK)
+├── products (tenant_id FK)
+├── orders (tenant_id FK)
+└── ... all other tenant-scoped tables
+```
+
+### Tenant Model
+
+```php app/Models/Tenant.php
+class Tenant extends Model
+{
+    protected $fillable = [
+        'name',
+        'slug',
+        'owner_email',
+        'business_type',
+        'subscription_plan',
+        'trial_ends_at',
+        'subscription_ends_at',
+        'max_shops',
+        'max_users',
+        'max_products',
+        'is_active',
+    ];
+
+    public function users(): HasMany
+    {
+        return $this->hasMany(User::class);
+    }
+
+    public function shops(): HasMany
+    {
+        return $this->hasMany(Shop::class);
+    }
+
+    public function hasReachedShopLimit(): bool
+    {
+        return $this->shops()->count() >= $this->max_shops;
+    }
+
+    public function hasActiveSubscription(): bool
+    {
+        if ($this->isOnTrial()) {
+            return true;
+        }
+        return $this->subscription_ends_at && $this->subscription_ends_at->isFuture();
+    }
+}
+```
+
+## Automatic Tenant Scoping
+
+### BelongsToTenant Trait
+
+Every tenant-scoped model uses the `BelongsToTenant` trait:
+
+```php app/Traits/BelongsToTenant.php
+namespace App\Traits;
+
+use App\Scopes\TenantScope;
+
+trait BelongsToTenant
+{
+    protected static function bootBelongsToTenant(): void
+    {
+        // Automatically apply tenant scope to all queries
+        static::addGlobalScope(new TenantScope);
+
+        // Automatically set tenant_id when creating records
+        static::creating(function ($model) {
+            if (auth()->check() && ! $model->tenant_id) {
+                $model->tenant_id = auth()->user()->tenant_id;
+            }
+        });
+    }
+}
+```
+
+### TenantScope Implementation
+
+```php app/Scopes/TenantScope.php
+namespace App\Scopes;
+
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Scope;
+
+class TenantScope implements Scope
+{
+    public function apply(Builder $builder, Model $model): void
+    {
+        if (auth()->check() && auth()->user()->tenant_id) {
+            $builder->where($model->getTable().'.tenant_id', auth()->user()->tenant_id);
+        }
+    }
+}
+```
+
+### Using BelongsToTenant
+
+Every model that stores tenant-specific data must use this trait:
+
+```php app/Models/Product.php
+use App\Traits\BelongsToTenant;
+
+class Product extends Model
+{
+    use BelongsToTenant, HasFactory, SoftDeletes;
+
+    protected $fillable = [
+        'tenant_id',
+        'shop_id',
+        'name',
+        'slug',
+        // ...
+    ];
+
+    public function tenant(): BelongsTo
+    {
+        return $this->belongsTo(Tenant::class);
+    }
+}
+```
+
+## Query Examples
+
+### Automatic Filtering
+
+With the `BelongsToTenant` trait, queries are automatically scoped:
+
+```php
+// ✅ Automatically filtered by tenant_id
+$products = Product::query()->get();
+// SQL: SELECT * FROM products WHERE tenant_id = 123
+
+$orders = Order::query()->where('status', 'pending')->get();
+// SQL: SELECT * FROM orders WHERE tenant_id = 123 AND status = 'pending'
+```
+
+### Creating Records
+
+```php
+// ✅ tenant_id is automatically set
+$product = Product::query()->create([
+    'name' => 'New Product',
+    'shop_id' => $shop->id,
+    // tenant_id is auto-filled from auth()->user()->tenant_id
+]);
+```
+
+### Service Layer Enforcement
+
+Services receive tenant explicitly and set it on all operations:
+
+```php app/Services/ProductService.php
+public function create(array $data, Tenant $tenant, Shop $shop): Product
+{
+    return DB::transaction(function () use ($data, $tenant, $shop) {
+        $productData = [
+            'tenant_id' => $tenant->id,  // Explicitly set
+            'shop_id' => $shop->id,
+            'name' => $data['name'],
+            // ...
+        ];
+
+        return Product::query()->create($productData);
+    });
+}
+```
+
+## User-Tenant Relationship
+
+### User Model
+
+```php app/Models/User.php
+class User extends Authenticatable
+{
+    use BelongsToTenant;
+
+    protected $fillable = [
+        'first_name',
+        'last_name',
+        'email',
+        'tenant_id',
+        'is_tenant_owner',
+        'role',
+        'is_active',
+    ];
+
+    public function tenant(): BelongsTo
+    {
+        return $this->belongsTo(Tenant::class);
+    }
+
+    public function isTenantOwner(): bool
+    {
+        return $this->is_tenant_owner;
+    }
+
+    public function canAccessTenant(?int $tenantId): bool
+    {
+        if ($this->isSuperAdmin()) {
+            return true;
+        }
+        return $this->tenant_id === $tenantId;
+    }
+}
+```
+
+### Authentication Flow
+
+1. User logs in with email/password
+2. Laravel authenticates and loads User model
+3. User model includes `tenant_id`
+4. All subsequent queries use `auth()->user()->tenant_id`
+
+```php
+// After authentication
+$user = auth()->user();
+$user->tenant_id;  // 123
+
+// All queries automatically filter by this tenant_id
+Product::query()->get();  // Only products for tenant 123
+```
+
+## Database Schema
+
+### Tenants Table
+
+```php database/migrations/create_tenants_table.php
+Schema::create('tenants', function (Blueprint $table) {
+    $table->id();
+    $table->string('name');
+    $table->string('slug')->unique();
+    $table->string('owner_email');
+    $table->string('business_type')->nullable();
+    
+    // Subscription management
+    $table->string('subscription_plan')->default('trial');
+    $table->timestamp('trial_ends_at')->nullable();
+    $table->timestamp('subscription_ends_at')->nullable();
+    
+    // Resource limits
+    $table->integer('max_shops')->default(10);
+    $table->integer('max_users')->default(10);
+    $table->integer('max_products')->default(100);
+    
+    $table->boolean('is_active')->default(true);
+    $table->timestamps();
+    $table->softDeletes();
+    
+    $table->index('slug');
+    $table->index('is_active');
+});
+```
+
+### Users Table
+
+```php database/migrations/create_users_table.php
+Schema::create('users', function (Blueprint $table) {
+    $table->id();
+    $table->foreignIdFor(Tenant::class)->nullable()->constrained()->cascadeOnDelete();
+    
+    $table->string('first_name');
+    $table->string('last_name');
+    $table->string('email');
+    $table->string('password');
+    $table->boolean('is_tenant_owner')->default(false);
+    $table->string('role')->default('owner');
+    $table->boolean('is_active')->default(true);
+    
+    $table->timestamps();
+    $table->softDeletes();
+    
+    // IMPORTANT: Email is unique per tenant, not globally
+    $table->unique(['tenant_id', 'email']);
+    $table->index(['tenant_id', 'is_active']);
+});
+```
+
+### Product Table Example
+
+```php
+Schema::create('products', function (Blueprint $table) {
+    $table->id();
+    $table->foreignIdFor(Tenant::class)->constrained()->cascadeOnDelete();
+    $table->foreignIdFor(Shop::class)->constrained()->cascadeOnDelete();
+    $table->string('name');
+    $table->string('slug');
+    $table->boolean('is_active')->default(true);
+    $table->timestamps();
+    $table->softDeletes();
+    
+    // Index for tenant-scoped queries
+    $table->index(['tenant_id', 'shop_id']);
+    $table->index(['tenant_id', 'is_active']);
+});
+```
+
+<Note>
+  Notice how `tenant_id` is always the first column in composite indexes for optimal query performance.
+</Note>
+
+## Bypassing Tenant Scope
+
+<Warning>
+  Only bypass tenant scoping in very specific admin/reporting scenarios. This should be extremely rare and heavily audited.
+</Warning>
+
+```php
+// Remove all global scopes (including TenantScope)
+$allProducts = Product::withoutGlobalScopes()->get();
+
+// Remove only TenantScope
+$allProducts = Product::withoutGlobalScope(TenantScope::class)->get();
+```
+
+## Super Admin Access
+
+Super admins can access any tenant's data:
+
+```php app/Models/User.php
+public function isSuperAdmin(): bool
+{
+    return $this->is_super_admin || $this->role === UserRole::SUPER_ADMIN;
+}
+
+public function canAccessTenant(?int $tenantId): bool
+{
+    if ($this->isSuperAdmin()) {
+        return true;  // Super admins can access any tenant
+    }
+    return $this->tenant_id === $tenantId;
+}
+```
+
+## Multi-Shop Within Tenant
+
+Tenants can have multiple shops, creating a two-level hierarchy:
+
+```
+Tenant (Organization)
+  ├── Shop 1 (Location A)
+  │   ├── Products
+  │   ├── Inventory
+  │   └── Orders
+  └── Shop 2 (Location B)
+      ├── Products
+      ├── Inventory
+      └── Orders
+```
+
+### Shop-Level Filtering
+
+```php
+// Get products for specific shop within tenant
+$products = Product::query()
+    ->where('shop_id', $shop->id)
+    ->get();
+// SQL: SELECT * FROM products WHERE tenant_id = 123 AND shop_id = 5
+```
+
+### Cross-Shop Authorization
+
+Some roles can access multiple shops within their tenant:
+
+```php app/Enums/UserRole.php
+public function canAccessMultipleStores(): bool
+{
+    return match ($this) {
+        self::SUPER_ADMIN, self::OWNER, self::GENERAL_MANAGER => true,
+        default => false,
+    };
+}
+```
+
+## Testing Tenant Isolation
+
+```php tests/Feature/TenantIsolationTest.php
+test('users cannot access other tenant data', function () {
+    $tenant1 = Tenant::factory()->create();
+    $tenant2 = Tenant::factory()->create();
+    
+    $user1 = User::factory()->for($tenant1)->create();
+    $product2 = Product::factory()->for($tenant2)->create();
+    
+    actingAs($user1);
+    
+    // Should not be able to see tenant2's product
+    expect(Product::query()->count())->toBe(0);
+    expect(Product::query()->find($product2->id))->toBeNull();
+});
+```
+
+## Security Checklist
+
+<AccordionGroup>
+  <Accordion title="Models">
+    - [ ] All tenant-scoped models use `BelongsToTenant` trait
+    - [ ] `tenant_id` is in `$fillable` array
+    - [ ] Foreign key constraints include `cascadeOnDelete()`
+    - [ ] Indexes include `tenant_id` as first column
+  </Accordion>
+
+  <Accordion title="Migrations">
+    - [ ] All tenant-scoped tables have `tenant_id` column
+    - [ ] Foreign key: `foreignIdFor(Tenant::class)->constrained()->cascadeOnDelete()`
+    - [ ] Composite indexes start with `tenant_id`
+    - [ ] Unique constraints include `tenant_id` where applicable
+  </Accordion>
+
+  <Accordion title="Services">
+    - [ ] Services receive `Tenant` parameter explicitly
+    - [ ] `tenant_id` is explicitly set when creating records
+    - [ ] Queries use `Model::query()->` pattern
+    - [ ] No queries bypass TenantScope without justification
+  </Accordion>
+
+  <Accordion title="Policies">
+    - [ ] First check: `$user->tenant_id !== $model->tenant_id`
+    - [ ] Super admin bypass is intentional and documented
+    - [ ] Shop-level access is verified for shop-scoped data
+  </Accordion>
+</AccordionGroup>
+
+## Related Documentation
+
+- [Authorization](/architecture/authorization) - Role-based access within tenants
+- [Service Layer](/architecture/service-layer) - How services enforce tenant isolation
+- [Database Schema](/architecture/database-schema) - Complete schema with tenant relationships

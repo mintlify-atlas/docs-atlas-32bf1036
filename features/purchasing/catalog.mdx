@@ -1,0 +1,284 @@
+---
+title: Supplier Catalog Management
+description: Manage product catalogs, pricing tiers, and catalog visibility for B2B suppliers in ShelfWise
+---
+
+## Overview
+
+The supplier catalog system allows suppliers to offer products to buyer tenants with flexible pricing, minimum order quantities, and visibility controls.
+
+## Adding Products to Catalog
+
+Suppliers add existing products to their catalog with wholesale pricing:
+
+```php
+use App\Services\SupplierService;
+
+$catalogItem = $supplierService->addToCatalog(
+    $supplierTenant,
+    $product,
+    [
+        'is_available' => true,
+        'base_wholesale_price' => 45.00,
+        'min_order_quantity' => 10,
+        'visibility' => CatalogVisibility::CONNECTIONS_ONLY,
+        'description' => 'Bulk pricing available for orders over 50 units',
+        'pricing_tiers' => [
+            ['min_quantity' => 10, 'max_quantity' => 49, 'price' => 45.00],
+            ['min_quantity' => 50, 'max_quantity' => 99, 'price' => 42.00],
+            ['min_quantity' => 100, 'max_quantity' => null, 'price' => 38.00]
+        ]
+    ]
+);
+```
+
+See: `app/Services/SupplierService.php:75`
+
+<Note>
+The `base_wholesale_price` is used when no pricing tier matches the order quantity.
+</Note>
+
+## Catalog Visibility Modes
+
+Control who can see catalog items using the `CatalogVisibility` enum:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `PUBLIC` | Visible to all tenants | Open marketplace items |
+| `CONNECTIONS_ONLY` | Only visible to approved buyers | Exclusive supplier relationships |
+
+```php
+use App\Enums\CatalogVisibility;
+
+$catalogItem->update([
+    'visibility' => CatalogVisibility::PUBLIC
+]);
+```
+
+<Warning>
+Even with `PUBLIC` visibility, buyers must have an active connection (APPROVED or ACTIVE status) to place orders.
+</Warning>
+
+## Pricing Tiers
+
+Pricing tiers enable volume-based discounts with two types:
+
+### General Pricing Tiers
+
+Apply to all buyers:
+
+```php
+$supplierService->addPricingTier($catalogItem, [
+    'min_quantity' => 50,
+    'max_quantity' => 99,
+    'price' => 42.00
+], null); // null = no specific connection
+```
+
+### Connection-Specific Pricing
+
+Offer custom pricing to individual buyers:
+
+```php
+$supplierService->addPricingTier($catalogItem, [
+    'min_quantity' => 20,
+    'max_quantity' => null,
+    'price' => 40.00
+], $connection->id); // Specific buyer connection
+```
+
+<Note>
+Connection-specific pricing always takes priority over general tiers when calculating prices.
+</Note>
+
+### Price Calculation Logic
+
+<Steps>
+  <Step title="Check for connection-specific tiers">
+    If a `connection_id` is provided, the system first searches for tiers matching that connection:
+    
+    ```php
+    $connectionTier = $tiersQuery
+        ->where('connection_id', $connectionId)
+        ->first();
+    
+    if ($connectionTier) {
+        return $connectionTier->price;
+    }
+    ```
+    
+    See: `app/Services/SupplierService.php:201`
+  </Step>
+  
+  <Step title="Fall back to general tiers">
+    If no connection-specific tier matches, use general tiers:
+    
+    ```php
+    $generalTier = $tiersQuery
+        ->whereNull('connection_id')
+        ->first();
+    
+    return $generalTier ? $generalTier->price : $this->base_wholesale_price;
+    ```
+    
+    See: `app/Models/SupplierCatalogItem.php:53`
+  </Step>
+  
+  <Step title="Use base price if no tiers match">
+    If the quantity doesn't match any tier range, the `base_wholesale_price` is used.
+  </Step>
+</Steps>
+
+## Retrieving Catalog Items
+
+### For Suppliers (Manage Catalog)
+
+```php
+$catalogItems = SupplierCatalogItem::forSupplier($tenantId)
+    ->with(['product.variants', 'pricingTiers'])
+    ->latest()
+    ->get();
+```
+
+### For Buyers (Browse Catalog)
+
+```php
+$catalogItems = $supplierService->getAvailableCatalog(
+    $supplierTenant,  // Filter by supplier
+    $buyerTenant      // Check visibility for this buyer
+);
+```
+
+The `getAvailableCatalog` method:
+- Filters by `is_available = true`
+- Respects visibility rules (PUBLIC or CONNECTIONS_ONLY)
+- Eager loads product variants and pricing tiers
+
+See: `app/Services/SupplierService.php:149`
+
+<Accordion title="Visibility filtering logic">
+The `visibleTo` scope uses a subquery to check connection status:
+
+```php
+public function scopeVisibleTo($query, $buyerTenantId)
+{
+    return $query->where(function ($q) use ($buyerTenantId) {
+        $q->where('visibility', CatalogVisibility::PUBLIC)
+            ->orWhere(function ($subQ) use ($buyerTenantId) {
+                $subQ->where('visibility', CatalogVisibility::CONNECTIONS_ONLY)
+                    ->whereExists(function ($existsQuery) use ($buyerTenantId) {
+                        $existsQuery->selectRaw('1')
+                            ->from('supplier_connections')
+                            ->whereColumn('supplier_connections.supplier_tenant_id', 'supplier_catalog_items.supplier_tenant_id')
+                            ->where('supplier_connections.buyer_tenant_id', $buyerTenantId)
+                            ->whereIn('supplier_connections.status', [
+                                ConnectionStatus::APPROVED->value,
+                                ConnectionStatus::ACTIVE->value,
+                            ]);
+                    });
+            });
+    });
+}
+```
+
+See: `app/Models/SupplierCatalogItem.php:92`
+</Accordion>
+
+## Updating Catalog Items
+
+```php
+$supplierService->updateCatalogItem($catalogItem, [
+    'is_available' => false,
+    'base_wholesale_price' => 50.00,
+    'pricing_tiers' => [
+        ['min_quantity' => 10, 'max_quantity' => null, 'price' => 48.00]
+    ]
+]);
+```
+
+<Warning>
+Updating `pricing_tiers` deletes all existing **general** pricing tiers (where `connection_id` is null) and recreates them. Connection-specific tiers are preserved.
+
+See: `app/Services/SupplierService.php:110`
+</Warning>
+
+## Minimum Order Quantities
+
+Enforce minimum quantities per catalog item:
+
+```php
+$catalogItem = SupplierCatalogItem::create([
+    'min_order_quantity' => 25,
+    // ...
+]);
+```
+
+During purchase order creation, the system validates:
+
+```php
+if ($catalogItem->min_order_quantity && $quantity < $catalogItem->min_order_quantity) {
+    throw new \Exception(
+        "Quantity {$quantity} is below the minimum order quantity of {$catalogItem->min_order_quantity}"
+    );
+}
+```
+
+See: `app/Services/PurchaseOrderService.php:77`
+
+## Performance Optimization
+
+### Pricing Tier Cache
+
+The `SupplierService` caches pricing tier lookups to avoid N+1 queries:
+
+```php
+// Preload tiers for multiple items
+$supplierService->preloadPricingTiers($catalogItemIds);
+
+// Clear cache when tiers change
+$supplierService->clearTierCache();
+```
+
+See: `app/Services/SupplierService.php:226`
+
+### Eager Loading
+
+Always eager load relationships to prevent performance issues:
+
+```php
+SupplierCatalogItem::with([
+    'product.variants',
+    'pricingTiers',
+    'supplierTenant'
+])->get();
+```
+
+## Removing from Catalog
+
+```php
+$supplierService->removeFromCatalog($catalogItem);
+```
+
+<Note>
+Deleting a catalog item does NOT delete the underlying product. It only removes it from the supplier's offering.
+</Note>
+
+## Integration with Purchase Orders
+
+When creating a purchase order, buyers select catalog items:
+
+```php
+$purchaseOrderService->addItem($po, [
+    'catalog_item_id' => $catalogItem->id,
+    'quantity' => 50,
+    'product_variant_id' => $variant->id,
+    // unit_price is calculated automatically based on quantity and pricing tiers
+]);
+```
+
+The service automatically:
+1. Validates minimum order quantity
+2. Calculates price using tiers and connection settings
+3. Checks credit limits
+
+See: `app/Services/PurchaseOrderService.php:70`

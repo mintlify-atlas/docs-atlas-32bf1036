@@ -1,0 +1,381 @@
+---
+title: Testing Practices
+description: Testing strategies, tools, and requirements for ShelfWise
+---
+
+## Testing Framework
+
+ShelfWise uses **Pest PHP** for backend testing with PHPUnit configuration.
+
+### Test Suites
+
+Two main test suites:
+
+```xml phpunit.xml
+<testsuites>
+    <testsuite name="Unit">
+        <directory>tests/Unit</directory>
+    </testsuite>
+    <testsuite name="Feature">
+        <directory>tests/Feature</directory>
+    </testsuite>
+</testsuites>
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+composer test
+# or
+php artisan test
+
+# Run specific suite
+php artisan test --testsuite=Unit
+php artisan test --testsuite=Feature
+
+# Run specific test file
+php artisan test tests/Feature/Auth/AuthenticationTest.php
+
+# Run with coverage
+php artisan test --coverage
+```
+
+## Test Structure
+
+### Directory Organization
+
+```
+tests/
+├── Feature/
+│   ├── Auth/
+│   │   ├── AuthenticationTest.php
+│   │   ├── RegistrationTest.php
+│   │   └── PasswordResetTest.php
+│   ├── Models/
+│   │   ├── OrderItemTest.php
+│   │   └── CartItemTest.php
+│   ├── Storefront/
+│   │   ├── CheckoutWithServicesTest.php
+│   │   └── AddServiceToCartTest.php
+│   └── StaffTaxIntegrationTest.php
+├── Unit/
+│   └── ExampleTest.php
+├── Pest.php
+└── TestCase.php
+```
+
+### Writing Feature Tests
+
+<Accordion title="Authentication Test Example">
+```php tests/Feature/Auth/AuthenticationTest.php
+use App\Models\User;
+use Illuminate\Support\Facades\RateLimiter;
+
+uses(\Illuminate\Foundation\Testing\RefreshDatabase::class);
+
+test('login screen can be rendered', function () {
+    $response = $this->get(route('login'));
+    $response->assertStatus(200);
+});
+
+test('users can authenticate using the login screen', function () {
+    $user = User::factory()->withoutTwoFactor()->create();
+
+    $response = $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'password',
+    ]);
+
+    $this->assertAuthenticated();
+    $response->assertRedirect(route('dashboard', absolute: false));
+});
+
+test('users can not authenticate with invalid password', function () {
+    $user = User::factory()->create();
+
+    $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'wrong-password',
+    ]);
+
+    $this->assertGuest();
+});
+
+test('users are rate limited', function () {
+    $user = User::factory()->create();
+
+    RateLimiter::increment(implode('|', [$user->email, '127.0.0.1']), amount: 10);
+
+    $response = $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'wrong-password',
+    ]);
+
+    $response->assertSessionHasErrors('email');
+    $errors = session('errors');
+    $this->assertStringContainsString('Too many login attempts', $errors->first('email'));
+});
+```
+</Accordion>
+
+### Writing Unit Tests
+
+<Accordion title="Simple Unit Test Example">
+```php tests/Unit/ExampleTest.php
+test('that true is true', function () {
+    expect(true)->toBeTrue();
+});
+```
+</Accordion>
+
+## Testing Requirements
+
+### Minimum Coverage by Layer
+
+| Layer                 | Tool         | Minimum Coverage                       |
+|-----------------------|--------------|----------------------------------------|
+| PHP Unit Tests        | Pest/PHPUnit | Services, Tax/Payroll calculations     |
+| React Component Tests | Vitest/Jest  | Forms, complex components              |
+| E2E Tests             | Playwright   | Auth flow, POS, Order creation         |
+| API Tests             | Pest         | All public endpoints                   |
+
+### Critical Test Coverage
+
+**Services** - Test all business logic:
+- Stock management operations
+- Tax calculations
+- Payroll processing
+- Order creation and updates
+- Payment processing
+
+**Models** - Test relationships and computed properties:
+```php
+test('order calculates total correctly', function () {
+    $order = Order::factory()->create();
+    $item1 = OrderItem::factory()->for($order)->create(['total' => 100]);
+    $item2 = OrderItem::factory()->for($order)->create(['total' => 50]);
+    
+    expect($order->fresh()->total)->toBe(150);
+});
+```
+
+**Controllers** - Test authorization and responses:
+```php
+test('unauthorized users cannot create products', function () {
+    $user = User::factory()->create(['role' => UserRole::CASHIER]);
+    
+    $this->actingAs($user)
+        ->post(route('products.store'), $data)
+        ->assertForbidden();
+});
+```
+
+## Multi-Tenancy Testing
+
+**Always test tenant isolation:**
+
+```php
+test('users cannot access other tenant products', function () {
+    $tenant1 = Tenant::factory()->create();
+    $tenant2 = Tenant::factory()->create();
+    
+    $user = User::factory()->for($tenant1)->create();
+    $product = Product::factory()->for($tenant2)->create();
+    
+    $this->actingAs($user)
+        ->get(route('products.show', $product))
+        ->assertForbidden();
+});
+
+test('queries are scoped to tenant', function () {
+    $tenant1 = Tenant::factory()->create();
+    $tenant2 = Tenant::factory()->create();
+    
+    Product::factory()->count(5)->for($tenant1)->create();
+    Product::factory()->count(3)->for($tenant2)->create();
+    
+    $user = User::factory()->for($tenant1)->create();
+    
+    $products = app(ProductService::class)->getAllProducts($user);
+    
+    expect($products)->toHaveCount(5);
+});
+```
+
+## Database Testing
+
+### Using RefreshDatabase
+
+```php
+uses(\Illuminate\Foundation\Testing\RefreshDatabase::class);
+
+test('example test', function () {
+    // Database is automatically migrated and rolled back
+});
+```
+
+### Factories
+
+Use factories for test data:
+
+```php
+$user = User::factory()->create();
+$product = Product::factory()
+    ->for($tenant)
+    ->has(ProductVariant::factory()->count(3))
+    ->create();
+```
+
+## Frontend Testing
+
+### Component Testing
+
+```bash
+# Run frontend tests
+npm run test
+
+# Run with coverage
+npm run test:coverage
+```
+
+### E2E Testing with Playwright
+
+```bash
+# Run E2E tests
+npx playwright test
+
+# Run in UI mode
+npx playwright test --ui
+```
+
+**Critical E2E test flows:**
+- User authentication
+- POS checkout process
+- Order creation
+- Product management
+- Stock adjustments
+
+## Test Environment Configuration
+
+```xml phpunit.xml
+<php>
+    <env name="APP_ENV" value="testing"/>
+    <env name="DB_CONNECTION" value="mysql"/>
+    <env name="DB_DATABASE" value="shelfwisebeta"/>
+    <env name="CACHE_STORE" value="array"/>
+    <env name="QUEUE_CONNECTION" value="sync"/>
+    <env name="SESSION_DRIVER" value="array"/>
+    <env name="MAIL_MAILER" value="array"/>
+</php>
+```
+
+<Warning>
+  Tests run against the database specified in `phpunit.xml`. Ensure you have a dedicated test database.
+</Warning>
+
+## Testing Workflow
+
+### Before Coding
+
+1. Write failing tests for new features (TDD approach)
+2. Define expected behavior
+
+### During Coding
+
+1. Run tests frequently: `php artisan test`
+2. Fix failing tests immediately
+3. Add tests for edge cases
+
+### Before Merge
+
+<Accordion title="Pre-Merge Checklist">
+- [ ] Run full test suite: `php artisan test`
+- [ ] Run frontend tests: `npm run test`
+- [ ] Type check: `npm run types`
+- [ ] Check for N+1 queries
+- [ ] Verify tenant isolation on new queries
+- [ ] Test critical E2E flows with Playwright
+</Accordion>
+
+## Common Testing Patterns
+
+### Testing Policies
+
+```php
+test('owner can delete products', function () {
+    $tenant = Tenant::factory()->create();
+    $owner = User::factory()->for($tenant)->create(['role' => UserRole::OWNER]);
+    $product = Product::factory()->for($tenant)->create();
+    
+    expect($owner->can('delete', $product))->toBeTrue();
+});
+
+test('cashier cannot delete products', function () {
+    $tenant = Tenant::factory()->create();
+    $cashier = User::factory()->for($tenant)->create(['role' => UserRole::CASHIER]);
+    $product = Product::factory()->for($tenant)->create();
+    
+    expect($cashier->can('delete', $product))->toBeFalse();
+});
+```
+
+### Testing Services
+
+```php
+test('stock movement service creates audit trail', function () {
+    $user = User::factory()->create();
+    $variant = ProductVariant::factory()->create();
+    $location = InventoryLocation::factory()->create(['quantity' => 100]);
+    
+    $service = app(StockMovementService::class);
+    $movement = $service->adjustStock(
+        $variant,
+        $location,
+        10,
+        StockMovementType::ADJUSTMENT_IN,
+        $user,
+        'Restocking'
+    );
+    
+    expect($movement->quantity_before)->toBe(100)
+        ->and($movement->quantity_after)->toBe(110)
+        ->and($movement->created_by)->toBe($user->id);
+});
+```
+
+### Testing API Endpoints
+
+```php
+test('products endpoint returns paginated results', function () {
+    $user = User::factory()->create();
+    Product::factory()->count(25)->for($user->tenant)->create();
+    
+    $response = $this->actingAs($user)
+        ->getJson(route('api.products.index'))
+        ->assertOk()
+        ->assertJsonStructure([
+            'data' => [['id', 'name', 'sku']],
+            'meta' => ['current_page', 'total'],
+        ]);
+    
+    expect($response->json('data'))->toHaveCount(15);
+});
+```
+
+## MCP Integration
+
+<Note>
+  Use the `laravel-boost` MCP server to check Laravel logs during test development:
+  
+  ```bash
+  # Via MCP
+  laravel_boost_get_logs
+  ```
+</Note>
+
+## Additional Resources
+
+- [Pest PHP Documentation](https://pestphp.com)
+- [Laravel Testing Documentation](https://laravel.com/docs/testing)
+- [Playwright Documentation](https://playwright.dev)

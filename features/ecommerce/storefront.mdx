@@ -1,0 +1,215 @@
+---
+title: Storefront Configuration
+description: Configure your online store settings, appearance, and customer-facing features for e-commerce operations
+---
+
+## Overview
+
+The ShelfWise storefront allows you to enable e-commerce capabilities for any shop in your tenant. Each shop can have its own storefront with customizable settings, branding, and product catalog.
+
+## Enabling the Storefront
+
+Storefronts are enabled at the shop level using the `storefront_enabled` flag:
+
+```php
+// app/Models/Shop.php:22
+$shop->update([
+    'storefront_enabled' => true,
+    'storefront_settings' => [
+        'theme_color' => '#3b82f6',
+        'logo_url' => 'https://example.com/logo.png',
+        'banner_url' => 'https://example.com/banner.jpg',
+        'about_text' => 'Welcome to our store!',
+        'contact_email' => 'support@example.com',
+        'shipping_policy' => 'We ship within 2-3 business days.',
+        'return_policy' => '30-day return policy applies.',
+    ],
+]);
+```
+
+<Note>
+  The `storefront_settings` field is cast as an array (app/Models/Shop.php:30) and can store any JSON-serializable configuration data.
+</Note>
+
+## Storefront Routes
+
+All storefront routes are prefixed with `/store/{shop:slug}` and use route binding to load the shop by its slug:
+
+<Accordion title="Available Storefront Routes">
+  ```php
+  // routes/storefront.php:20-26
+  Route::get('/', [StorefrontController::class, 'index'])->name('storefront.index');
+  Route::get('/products', [StorefrontController::class, 'products'])->name('storefront.products');
+  Route::get('/products/{product:slug}', [StorefrontController::class, 'show'])->name('storefront.product');
+  Route::get('/services', [StorefrontController::class, 'services'])->name('storefront.services');
+  Route::get('/services/{service:slug}', [StorefrontController::class, 'showService'])->name('storefront.service');
+  ```
+  
+  **Example URLs:**
+  - Homepage: `/store/downtown-store`
+  - Product listing: `/store/downtown-store/products`
+  - Product detail: `/store/downtown-store/products/wireless-headphones`
+</Accordion>
+
+## Storefront Middleware
+
+All storefront routes are protected by the `storefront.enabled` middleware, which verifies that the shop has e-commerce enabled:
+
+```php
+// routes/storefront.php:20
+Route::prefix('store/{shop:slug}')
+    ->middleware('storefront.enabled')
+    ->name('storefront.')
+    ->group(function () {
+        // routes...
+    });
+```
+
+<Warning>
+  If a shop has `storefront_enabled` set to `false`, customers will receive a 403 error when trying to access the storefront.
+</Warning>
+
+## Storefront Settings Schema
+
+The `storefront_settings` field supports the following configuration options:
+
+<ParamField path="theme_color" type="string">
+  Primary color for the storefront theme (hex format)
+</ParamField>
+
+<ParamField path="logo_url" type="string">
+  URL to the shop's logo image
+</ParamField>
+
+<ParamField path="banner_url" type="string">
+  URL to the homepage banner image
+</ParamField>
+
+<ParamField path="about_text" type="string">
+  Markdown-supported text describing the shop
+</ParamField>
+
+<ParamField path="contact_email" type="string">
+  Customer support email address
+</ParamField>
+
+<ParamField path="contact_phone" type="string">
+  Customer support phone number
+</ParamField>
+
+<ParamField path="shipping_policy" type="string">
+  Shipping terms and conditions
+</ParamField>
+
+<ParamField path="return_policy" type="string">
+  Return and refund policy details
+</ParamField>
+
+<ParamField path="announcement_bar" type="object">
+  ```json
+  {
+    "enabled": true,
+    "message": "Free shipping on orders over $50!",
+    "background_color": "#10b981",
+    "text_color": "#ffffff"
+  }
+  ```
+</ParamField>
+
+<ParamField path="social_links" type="object">
+  ```json
+  {
+    "facebook": "https://facebook.com/yourshop",
+    "instagram": "https://instagram.com/yourshop",
+    "twitter": "https://twitter.com/yourshop"
+  }
+  ```
+</ParamField>
+
+## Currency and Tax Settings
+
+Storefronts inherit currency and tax configuration from the parent shop:
+
+```php
+// app/Models/Shop.php:24-26
+$shop->currency;          // e.g., 'USD'
+$shop->currency_symbol;   // e.g., '$'
+$shop->currency_decimals; // e.g., 2
+
+$shop->vat_enabled;       // boolean
+$shop->vat_rate;          // decimal (e.g., 7.5 for 7.5%)
+$shop->vat_inclusive;     // boolean - whether prices include VAT
+```
+
+<Note>
+  All product prices displayed on the storefront will automatically format using the shop's currency settings.
+</Note>
+
+## Customer Journey
+
+A typical customer workflow on the storefront:
+
+1. **Browse Products** - Customer visits `/store/{shop}/products` and browses available items
+2. **Add to Cart** - Items are added to session-based or customer-linked cart (routes/storefront.php:27-31)
+3. **Create Account** - Guest registers or logs in at `/store/{shop}/register` or `/store/{shop}/login`
+4. **Checkout** - Customer proceeds to checkout at `/store/{shop}/checkout` (auth required)
+5. **Payment** - Complete payment via available methods (Paystack, Cash on Delivery, Bank Transfer)
+6. **Confirmation** - Order confirmation displayed at `/store/{shop}/checkout/success/{order}`
+
+## Multi-Tenant Isolation
+
+Storefronts are fully tenant-isolated:
+
+```php
+// app/Models/Shop.php:15-17
+use BelongsToTenant;
+
+// Every shop query must filter by tenant_id
+$shop = Shop::query()
+    ->where('tenant_id', $tenant->id)
+    ->where('storefront_enabled', true)
+    ->where('slug', $slug)
+    ->first();
+```
+
+<Warning>
+  Always ensure tenant isolation when querying shops or storefront data. Never expose one tenant's storefront to another tenant's customers.
+</Warning>
+
+## Example: Updating Storefront Settings
+
+```php
+use App\Models\Shop;
+
+$shop = Shop::query()->find($shopId);
+
+$shop->update([
+    'storefront_enabled' => true,
+    'storefront_settings' => [
+        'theme_color' => '#6366f1',
+        'logo_url' => asset('storage/logos/shop-logo.png'),
+        'banner_url' => asset('storage/banners/hero-banner.jpg'),
+        'about_text' => 'We offer premium electronics and gadgets.',
+        'contact_email' => 'support@myshop.com',
+        'contact_phone' => '+234 800 123 4567',
+        'shipping_policy' => 'Free shipping on orders over ₦10,000.',
+        'return_policy' => '14-day return policy for unopened items.',
+        'announcement_bar' => [
+            'enabled' => true,
+            'message' => 'New Year Sale - 20% off everything!',
+            'background_color' => '#dc2626',
+            'text_color' => '#ffffff',
+        ],
+        'social_links' => [
+            'instagram' => 'https://instagram.com/myshop',
+            'facebook' => 'https://facebook.com/myshop',
+        ],
+    ],
+]);
+```
+
+## Related Resources
+
+- [Customer Management](/features/ecommerce/customers)
+- [Payment Integration](/features/ecommerce/payments)
+- [Product Management](/features/inventory/products)

@@ -1,0 +1,535 @@
+---
+title: Reorder Alerts
+description: Automatic low stock notifications and purchase order suggestions
+---
+
+## Overview
+
+Reorder alerts help you maintain optimal stock levels by automatically notifying you when product variants fall below their reorder thresholds. ShelfWise provides intelligent alerts, prioritization, and purchase order suggestions.
+
+## How Reorder Alerts Work
+
+Each product variant has a `reorder_level` setting:
+
+```php
+// app/Models/ProductVariant.php:64
+
+$variant->reorder_level = 50; // Alert when stock drops to 50 or below
+```
+
+When the total stock across all locations for a variant reaches or falls below this level, it triggers a reorder alert.
+
+<Note>
+Reorder alerts only trigger for variants with `reorder_level > 0`. Set to `0` to disable alerts for a variant.
+</Note>
+
+## ReorderAlertService
+
+The core logic is in `app/Services/ReorderAlertService.php`:
+
+### Get Low Stock Variants
+
+```php
+// app/Services/ReorderAlertService.php:16-55
+
+use App\Services\ReorderAlertService;
+
+$lowStock = app(ReorderAlertService::class)->getLowStockVariants(
+    tenant: $tenant,
+    shop: $shop // Optional - filter by specific shop
+);
+
+// Returns collection with:
+[
+    [
+        'variant' => ProductVariant,
+        'current_stock' => 35,
+        'reorder_level' => 50,
+        'shortage' => 15,           // How many units below reorder level
+        'percentage' => 70.0,       // Current stock as % of reorder level
+    ],
+    // ... more variants
+]
+```
+
+### Alert Severity Levels
+
+Variants are categorized by severity:
+
+<Tabs>
+  <Tab title="Critical (Red)">
+    **Less than 25% of reorder level**
+    
+    ```php
+    // Stock: 10 units
+    // Reorder level: 50 units
+    // Percentage: 20%
+    // Status: CRITICAL - needs immediate attention
+    ```
+    
+    <Warning>
+    Critical items should be reordered immediately to avoid stockouts.
+    </Warning>
+  </Tab>
+  
+  <Tab title="Warning (Orange)">
+    **Between 25% and 50% of reorder level**
+    
+    ```php
+    // Stock: 20 units
+    // Reorder level: 50 units
+    // Percentage: 40%
+    // Status: WARNING - reorder soon
+    ```
+  </Tab>
+  
+  <Tab title="Low (Yellow)">
+    **Between 50% and 100% of reorder level**
+    
+    ```php
+    // Stock: 45 units
+    // Reorder level: 50 units
+    // Percentage: 90%
+    // Status: LOW - plan to reorder
+    ```
+  </Tab>
+</Tabs>
+
+### Get Critical Stock
+
+Quickly find items needing immediate attention:
+
+```php
+// app/Services/ReorderAlertService.php:60-64
+
+$critical = app(ReorderAlertService::class)->getCriticalStockVariants(
+    tenant: $tenant,
+    shop: $shop
+);
+
+// Returns only variants below 25% of reorder level
+```
+
+### Get Alert Summary
+
+For dashboard display:
+
+```php
+// app/Services/ReorderAlertService.php:98-115
+
+$summary = app(ReorderAlertService::class)->getAlertSummary(
+    tenant: $tenant,
+    shop: $shop
+);
+
+// Returns:
+[
+    'total_low_stock' => 23,      // Total items below reorder level
+    'critical_count' => 5,         // Items below 25%
+    'warning_count' => 8,          // Items between 25-50%
+    'critical_items' => [...],     // Top 5 critical items
+    'top_priority' => [...],       // Top 10 items by priority
+]
+```
+
+<Note>
+The alert summary is cached for 15 minutes. Cache is automatically cleared after any stock movement.
+</Note>
+
+## Setting Reorder Levels
+
+Set appropriate reorder levels based on:
+
+### Lead Time Method
+
+```php
+// Daily sales: 10 units/day
+// Supplier lead time: 5 days
+// Safety stock: 3 days
+// Reorder level = (10 × 5) + (10 × 3) = 80 units
+
+$variant->reorder_level = 80;
+```
+
+### Economic Order Quantity (EOQ) Method
+
+```php
+// D = Annual demand: 3,650 units
+// S = Ordering cost: $50 per order
+// H = Holding cost: $2 per unit per year
+// EOQ = sqrt((2 × D × S) / H) = 427 units
+// Reorder at 50% of EOQ = 214 units
+
+$variant->reorder_level = 214;
+```
+
+### Historical Sales Method
+
+```php
+// Average weekly sales: 50 units
+// Set reorder level at 2 weeks supply = 100 units
+
+$variant->reorder_level = 100;
+```
+
+## Stock Checking
+
+Check if a specific variant is low:
+
+```php
+// app/Services/ReorderAlertService.php:84-93
+
+$isLow = app(ReorderAlertService::class)->isLowStock(
+    variant: $variant,
+    shop: $shop // Optional
+);
+
+if ($isLow) {
+    // Display warning badge
+    // Send notification
+    // Suggest reorder
+}
+```
+
+## Viewing Reorder Alerts
+
+Implemented in `app/Http/Controllers/ReorderAlertController.php`:
+
+```php
+// app/Http/Controllers/ReorderAlertController.php:18-34
+
+// Navigate to: /reorder-alerts or /shops/{shop}/reorder-alerts
+
+public function index(?Shop $shop = null): Response
+{
+    $tenant = auth()->user()->tenant;
+    
+    $lowStock = $this->reorderAlertService->getLowStockVariants($tenant, $shop);
+    $summary = $this->reorderAlertService->getAlertSummary($tenant, $shop);
+    
+    return Inertia::render('ReorderAlerts/Index', [
+        'shop' => $shop,
+        'low_stock_items' => $lowStock,
+        'summary' => $summary,
+    ]);
+}
+```
+
+## Purchase Order Suggestions
+
+ShelfWise can generate suggested purchase orders based on low stock:
+
+```php
+// app/Services/ReorderAlertService.php:129-166
+
+$suggestions = app(ReorderAlertService::class)->getSuggestedPurchaseOrders(
+    tenant: $tenant,
+    shop: $shop
+);
+
+// Returns suggestions grouped by supplier:
+[
+    'supplier_id' => 123,
+    'items' => [
+        [
+            'variant_id' => 456,
+            'sku' => 'PROD-001',
+            'name' => 'Blue Shirt - Size M',
+            'current_stock' => 10,
+            'reorder_level' => 50,
+            'suggested_quantity' => 100,  // Max of (shortage, reorder_level × 2)
+            'cost_price' => 8.50,
+            'total_cost' => 850.00,
+        ],
+        // ... more items
+    ],
+    'total_items' => 5,
+    'total_cost' => 4250.00,
+]
+```
+
+### Suggested Quantity Logic
+
+The system suggests ordering the greater of:
+1. The shortage amount (reorder level - current stock)
+2. Double the reorder level (to prevent frequent reorders)
+
+```php
+// app/Services/ReorderAlertService.php:139-142
+
+$suggestedQuantity = max(
+    $shortage,                    // e.g., 40 units
+    $variant->reorder_level * 2   // e.g., 100 units
+);
+// Result: 100 units
+```
+
+## Cache Management
+
+Reorder alerts are cached for performance:
+
+```php
+// app/Services/ReorderAlertService.php:100-102
+
+$cacheKey = "reorder_alerts_{$tenant->id}" . ($shop ? "_{$shop->id}" : '');
+
+Cache::remember($cacheKey, now()->addMinutes(15), function () {
+    // Calculate alerts
+});
+```
+
+### Cache Invalidation
+
+Cache is automatically cleared after stock movements:
+
+```php
+// app/Services/StockMovementService.php:87-88
+
+$this->reorderAlertService->clearCache($user->tenant, null);
+```
+
+Manually clear cache:
+
+```php
+// app/Services/ReorderAlertService.php:120-124
+
+app(ReorderAlertService::class)->clearCache(
+    tenant: $tenant,
+    shop: $shop // Optional
+);
+```
+
+## Multi-Location Stock
+
+Reorder alerts consider stock across **all locations**:
+
+```php
+// app/Services/ReorderAlertService.php:69-79
+
+private function getTotalStock(ProductVariant $variant, ?Shop $shop = null): int
+{
+    if ($shop) {
+        // Stock at specific shop only
+        return $variant->inventoryLocations
+            ->where('location_type', 'App\\Models\\Shop')
+            ->where('location_id', $shop->id)
+            ->sum('quantity');
+    }
+    
+    // Total across all locations
+    return $variant->inventoryLocations->sum('quantity');
+}
+```
+
+<Note>
+When viewing tenant-wide alerts, the system sums stock across all shops and warehouses. When filtering by a specific shop, only that location's stock is considered.
+</Note>
+
+## Dashboard Widget Example
+
+```typescript
+import { usePage } from '@inertiajs/react';
+
+interface ReorderSummary {
+  total_low_stock: number;
+  critical_count: number;
+  warning_count: number;
+  critical_items: Array<{
+    variant: ProductVariant;
+    current_stock: number;
+    reorder_level: number;
+    percentage: number;
+  }>;
+}
+
+export default function ReorderAlertWidget() {
+  const { reorder_summary } = usePage<{ reorder_summary: ReorderSummary }>().props;
+
+  return (
+    <div className="card">
+      <h3>Low Stock Alerts</h3>
+      
+      <div className="stats">
+        <div className="stat critical">
+          <span className="count">{reorder_summary.critical_count}</span>
+          <span className="label">Critical</span>
+        </div>
+        
+        <div className="stat warning">
+          <span className="count">{reorder_summary.warning_count}</span>
+          <span className="label">Warning</span>
+        </div>
+        
+        <div className="stat low">
+          <span className="count">{reorder_summary.total_low_stock}</span>
+          <span className="label">Total Low</span>
+        </div>
+      </div>
+      
+      <div className="critical-items">
+        <h4>Immediate Attention Needed</h4>
+        {reorder_summary.critical_items.map((item) => (
+          <div key={item.variant.id} className="alert-item">
+            <span className="sku">{item.variant.sku}</span>
+            <span className="name">{item.variant.product.name}</span>
+            <span className="stock">
+              {item.current_stock} / {item.reorder_level}
+            </span>
+            <span className="percentage" style={{ color: 'red' }}>
+              {item.percentage}%
+            </span>
+          </div>
+        ))}
+      </div>
+      
+      <a href="/features/inventory/reorder-alerts" className="btn-view-all">
+        View All Alerts
+      </a>
+    </div>
+  );
+}
+```
+
+## Notifications
+
+Set up notifications for low stock alerts:
+
+```php
+use App\Notifications\LowStockAlert;
+
+// Daily job to check and notify
+Schedule::call(function () {
+    $tenants = Tenant::where('is_active', true)->get();
+    
+    foreach ($tenants as $tenant) {
+        $critical = app(ReorderAlertService::class)
+            ->getCriticalStockVariants($tenant);
+        
+        if ($critical->count() > 0) {
+            // Notify shop managers
+            $managers = $tenant->users()
+                ->whereIn('role', [UserRole::OWNER, UserRole::GENERAL_MANAGER])
+                ->get();
+            
+            foreach ($managers as $manager) {
+                $manager->notify(new LowStockAlert($critical));
+            }
+        }
+    }
+})->daily()->at('08:00');
+```
+
+## Inventory Models and Reorder Behavior
+
+ShelfWise supports three inventory models (from `app/Enums/InventoryModel.php`):
+
+<Tabs>
+  <Tab title="Simple Retail">
+    **Best for**: 70% of small shops, retail stores, convenience stores
+    
+    - Single unit pricing
+    - Straightforward reorder levels in base units
+    - Easy to understand alerts
+    
+    ```php
+    $variant->base_unit_name = 'Piece';
+    $variant->reorder_level = 50; // Reorder when below 50 pieces
+    ```
+  </Tab>
+  
+  <Tab title="Wholesale Only">
+    **Best for**: Distributors, wholesalers, cash-and-carry
+    
+    - Package-based sales only
+    - Reorder levels in base units, but think in packages
+    - Minimum order quantities
+    
+    ```php
+    $variant->base_unit_name = 'Bottle';
+    $variant->reorder_level = 240; // 10 cases × 24 bottles
+    ```
+  </Tab>
+  
+  <Tab title="Hybrid">
+    **Best for**: Medium-sized supermarkets, growing businesses
+    
+    - Sell both retail and wholesale
+    - Break packages when needed
+    - Reorder at package boundaries
+    
+    ```php
+    $variant->base_unit_name = 'Can';
+    $variant->reorder_level = 288; // 12 cartons × 24 cans
+    // Can sell individual cans or full cartons
+    ```
+  </Tab>
+</Tabs>
+
+## Best Practices
+
+<Tabs>
+  <Tab title="Setting Levels">
+    - Review reorder levels quarterly
+    - Adjust for seasonal demand changes
+    - Factor in supplier lead times
+    - Account for sales velocity trends
+    - Set higher levels for high-value, slow-moving items
+  </Tab>
+  <Tab title="Monitoring">
+    - Check critical alerts daily
+    - Review all alerts weekly
+    - Investigate frequent alerting items
+    - Update reorder levels based on actual usage
+    - Track time-to-reorder for each supplier
+  </Tab>
+  <Tab title="Actions">
+    - Prioritize critical items first
+    - Batch orders by supplier to save costs
+    - Consider storage capacity when ordering
+    - Document reasons for emergency orders
+    - Track reorder costs vs. stockout costs
+  </Tab>
+  <Tab title="Integration">
+    - Display alerts on dashboard
+    - Send daily digest emails to managers
+    - Integrate with purchase order system
+    - Track alert response times
+    - Monitor false positive rates
+  </Tab>
+</Tabs>
+
+## Multi-Tenant Isolation
+
+<Warning>
+**CRITICAL**: All reorder alert queries MUST be scoped to tenant
+</Warning>
+
+```php
+// ✅ CORRECT
+$lowStock = app(ReorderAlertService::class)->getLowStockVariants($tenant, $shop);
+
+// ✅ CORRECT - Service handles tenant isolation internally
+ProductVariant::query()
+    ->whereHas('product', fn ($q) => $q->where('tenant_id', $tenant->id))
+    ->where('reorder_level', '>', 0)
+    ->get();
+
+// ❌ WRONG - Missing tenant filter
+ProductVariant::where('reorder_level', '>', 0)->get();
+```
+
+## Performance Considerations
+
+<Note>
+For tenants with thousands of products:
+- Alerts are cached for 15 minutes
+- Use eager loading: `with(['inventoryLocations', 'product'])`
+- Consider background jobs for large calculations
+- Index the `reorder_level` column
+</Note>
+
+## Related Features
+
+- [Products & Variants](/features/inventory/products) - Set reorder levels
+- [Stock Movements](/features/inventory/stock-movements) - View stock changes
+- [Stock Take](/features/inventory/stock-take) - Reconcile physical counts

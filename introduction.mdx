@@ -1,0 +1,188 @@
+---
+title: ShelfWise documentation
+description: Multi-tenant inventory management system with POS, e-commerce, payroll, and supplier management
+mode: custom
+---
+
+<div className="relative bg-gradient-to-br from-blue-600 via-blue-500 to-indigo-600 dark:from-blue-900 dark:via-blue-800 dark:to-indigo-900 py-20 overflow-hidden">
+  <div className="absolute inset-0 bg-black/20 dark:bg-black/40"></div>
+  <div className="relative max-w-7xl mx-auto px-6 lg:px-8">
+    <div className="grid lg:grid-cols-12 gap-8 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-6">
+          Welcome to ShelfWise
+        </h1>
+        <p className="text-xl text-blue-100 dark:text-blue-200 max-w-2xl mb-8">
+          A complete multi-tenant inventory management platform with integrated POS, e-commerce storefront, payroll system, and supplier management.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center px-6 py-3 bg-white text-blue-600 font-semibold rounded-lg hover:bg-blue-50 transition-colors"
+          >
+            Get started
+            <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </a>
+          <a 
+            href="/features/inventory/products" 
+            className="inline-flex items-center px-6 py-3 bg-white/10 text-white font-semibold rounded-lg border border-white/30 hover:bg-white/20 transition-colors"
+          >
+            Explore features
+          </a>
+        </div>
+      </div>
+      <div className="lg:col-span-5 hidden lg:block">
+        <div className="bg-white/10 dark:bg-white/5 backdrop-blur-sm rounded-2xl p-8 border border-white/20">
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-blue-500 flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                </svg>
+              </div>
+              <div>
+                <div className="text-white font-semibold">Multi-tenant</div>
+                <div className="text-blue-100 text-sm">Isolated data per organization</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-indigo-500 flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+              </div>
+              <div>
+                <div className="text-white font-semibold">Complete POS</div>
+                <div className="text-blue-100 text-sm">Barcode scanning & receipts</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-blue-400 flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div>
+                <div className="text-white font-semibold">Payroll system</div>
+                <div className="text-blue-100 text-sm">Tax calculation & NIBSS export</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Quick start</h2>
+  <p className="text-gray-600 dark:text-gray-400 mb-8">Get ShelfWise up and running in minutes</p>
+  
+  <Steps>
+    <Step title="Clone and install dependencies">
+      Clone the repository and install PHP and Node.js dependencies.
+      
+      ```bash
+      git clone https://github.com/gHoSTeCHs/shelfwiser.git
+      cd shelfwiser
+      composer install
+      npm install
+      ```
+    </Step>
+    
+    <Step title="Configure environment">
+      Copy the example environment file and generate your application key.
+      
+      ```bash
+      cp .env.example .env
+      php artisan key:generate
+      ```
+      
+      <Note>Update your `.env` file with database credentials and other configuration values.</Note>
+    </Step>
+    
+    <Step title="Run migrations">
+      Set up the database schema and seed initial data.
+      
+      ```bash
+      php artisan migrate --seed
+      ```
+    </Step>
+    
+    <Step title="Start the development server">
+      Launch the application with Laravel server, queue worker, and Vite for asset compilation.
+      
+      ```bash
+      composer dev
+      ```
+      
+      <Info>This runs `php artisan serve`, `php artisan queue:listen`, and `npm run dev` concurrently.</Info>
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore by feature</h2>
+  <p className="text-gray-600 dark:text-gray-400 mb-8">Discover what ShelfWise can do for your business</p>
+  
+  <CardGroup cols={3}>
+    <Card title="Inventory management" icon="box" href="/features/inventory/products">
+      Track products, variants, stock movements, and set reorder alerts
+    </Card>
+    <Card title="Point of Sale" icon="cash-register" href="/features/sales/point-of-sale">
+      Complete POS with barcode scanning, cart management, and receipt printing
+    </Card>
+    <Card title="E-commerce storefront" icon="store" href="/features/ecommerce/storefront">
+      Launch your online store with customizable settings and payment integration
+    </Card>
+    <Card title="Supplier management" icon="truck" href="/features/purchasing/suppliers">
+      Manage supplier connections, catalogs, and purchase orders
+    </Card>
+    <Card title="Payroll system" icon="money-bill-wave" href="/features/payroll/overview">
+      Process payroll with tax calculation, deductions, and NIBSS export
+    </Card>
+    <Card title="Multi-shop support" icon="store-alt" href="/setup/configuration">
+      Manage multiple shops with individual currencies and VAT settings
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Architecture overview</h2>
+  <p className="text-gray-600 dark:text-gray-400 mb-8">Built on Laravel and React with a service-oriented architecture</p>
+  
+  <CardGroup cols={2}>
+    <Card title="Service layer" icon="layer-group" href="/architecture/service-layer">
+      Business logic organized in dedicated service classes
+    </Card>
+    <Card title="Multi-tenancy" icon="users" href="/architecture/multi-tenancy">
+      Complete tenant isolation with UUID-based data separation
+    </Card>
+    <Card title="Inertia + React" icon="react" href="/architecture/inertia-react">
+      Modern frontend with server-side routing and client-side hydration
+    </Card>
+    <Card title="Authorization" icon="shield-halved" href="/architecture/authorization">
+      8-level role hierarchy with policy-based access control
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-800 dark:to-indigo-800 rounded-2xl p-8 lg:p-12 text-center">
+    <h2 className="text-3xl font-bold text-white mb-4">Ready to build with ShelfWise?</h2>
+    <p className="text-xl text-blue-100 dark:text-blue-200 mb-8 max-w-2xl mx-auto">
+      Start exploring the documentation and set up your first multi-tenant inventory system
+    </p>
+    <a 
+      href="/quickstart" 
+      className="inline-flex items-center px-8 py-4 bg-white text-blue-600 font-semibold rounded-lg hover:bg-blue-50 transition-colors"
+    >
+      Get started now
+      <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+      </svg>
+    </a>
+  </div>
+</div>

@@ -1,0 +1,516 @@
+---
+title: Stock Movements
+description: Track and manage all inventory changes with a comprehensive audit trail
+---
+
+## Overview
+
+Every change to inventory in ShelfWise is recorded as a **Stock Movement**. This provides a complete audit trail for compliance, debugging, and inventory analysis.
+
+<Note>
+**CRITICAL**: All stock changes MUST go through `StockMovementService` to maintain data integrity and audit trail.
+</Note>
+
+## Stock Movement Types
+
+ShelfWise supports 14 different movement types, defined in `app/Enums/StockMovementType.php`:
+
+<Tabs>
+  <Tab title="Inbound">
+    <ParamField path="PURCHASE" type="StockMovementType">
+      Stock received from supplier or purchase order. Updates weighted average cost.
+    </ParamField>
+    <ParamField path="ADJUSTMENT_IN" type="StockMovementType">
+      Manual increase in stock quantity (found inventory, correction)
+    </ParamField>
+    <ParamField path="TRANSFER_IN" type="StockMovementType">
+      Stock received from another location within the tenant
+    </ParamField>
+    <ParamField path="RETURN" type="StockMovementType">
+      Stock returned from customer
+    </ParamField>
+    <ParamField path="PURCHASE_ORDER_RECEIVED" type="StockMovementType">
+      Stock received from supplier via purchase order system
+    </ParamField>
+  </Tab>
+  <Tab title="Outbound">
+    <ParamField path="SALE" type="StockMovementType">
+      Stock sold to customer
+    </ParamField>
+    <ParamField path="ADJUSTMENT_OUT" type="StockMovementType">
+      Manual decrease in stock quantity (loss, damage, correction)
+    </ParamField>
+    <ParamField path="TRANSFER_OUT" type="StockMovementType">
+      Stock sent to another location within the tenant
+    </ParamField>
+    <ParamField path="DAMAGE" type="StockMovementType">
+      Stock damaged or defective
+    </ParamField>
+    <ParamField path="LOSS" type="StockMovementType">
+      Stock lost or stolen
+    </ParamField>
+    <ParamField path="PURCHASE_ORDER_SHIPPED" type="StockMovementType">
+      Stock shipped to buyer via purchase order system
+    </ParamField>
+  </Tab>
+  <Tab title="Special">
+    <ParamField path="STOCK_TAKE" type="StockMovementType">
+      Physical inventory count adjustment (can increase or decrease)
+    </ParamField>
+    <ParamField path="PURCHASE_ORDER_RESERVED" type="StockMovementType">
+      Stock reserved for approved purchase order (doesn't change quantity)
+    </ParamField>
+    <ParamField path="PURCHASE_ORDER_RESERVATION_RELEASED" type="StockMovementType">
+      Stock reservation released for cancelled purchase order
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## Movement Direction
+
+Each movement type has a direction:
+
+```php
+// app/Enums/StockMovementType.php:62-84
+
+$type->isIncrease();  // Returns true for PURCHASE, ADJUSTMENT_IN, etc.
+$type->isDecrease();  // Returns true for SALE, ADJUSTMENT_OUT, etc.
+```
+
+## Stock Movement Model
+
+Each movement is recorded in `app/Models/StockMovement.php`:
+
+<ResponseField name="reference_number" type="string" required>
+  Unique reference like `PUR-01HQXXX`, `SAL-01HQYYY`
+</ResponseField>
+
+<ResponseField name="product_variant_id" type="integer" required>
+  The variant being moved
+</ResponseField>
+
+<ResponseField name="type" type="StockMovementType" required>
+  Type of movement (purchase, sale, adjustment, etc.)
+</ResponseField>
+
+<ResponseField name="quantity" type="integer" required>
+  Number of base units moved (always positive)
+</ResponseField>
+
+<ResponseField name="quantity_before" type="integer">
+  Stock level before this movement
+</ResponseField>
+
+<ResponseField name="quantity_after" type="integer">
+  Stock level after this movement
+</ResponseField>
+
+<ResponseField name="from_location_id" type="integer">
+  Source inventory location (for transfers and outbound)
+</ResponseField>
+
+<ResponseField name="to_location_id" type="integer">
+  Destination inventory location (for transfers and inbound)
+</ResponseField>
+
+<ResponseField name="product_packaging_type_id" type="integer">
+  Packaging type used (e.g., Box, Carton, Loose)
+</ResponseField>
+
+<ResponseField name="package_quantity" type="integer">
+  Number of packages moved (if using packaging)
+</ResponseField>
+
+<ResponseField name="cost_per_package" type="decimal">
+  Cost per package (for purchases)
+</ResponseField>
+
+<ResponseField name="cost_per_base_unit" type="decimal">
+  Cost per base unit (calculated from package cost)
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Human-readable reason for the movement
+</ResponseField>
+
+<ResponseField name="notes" type="text">
+  Additional notes or context
+</ResponseField>
+
+<ResponseField name="created_by" type="integer" required>
+  User who created this movement
+</ResponseField>
+
+## StockMovementService
+
+All stock operations go through `app/Services/StockMovementService.php`:
+
+### Adjust Stock
+
+Manually increase or decrease stock:
+
+```php
+// app/Services/StockMovementService.php:27-99
+
+use App\Services\StockMovementService;
+use App\Enums\StockMovementType;
+
+$movement = app(StockMovementService::class)->adjustStock(
+    variant: $variant,
+    location: $inventoryLocation,
+    quantity: 50,
+    type: StockMovementType::ADJUSTMENT_IN,
+    user: auth()->user(),
+    reason: 'Found inventory in storage',
+    notes: 'Located 50 units in back room during cleanup'
+);
+```
+
+<Warning>
+**Concurrency Safety**: This method uses pessimistic locking (`lockForUpdate`) to prevent race conditions during concurrent stock adjustments.
+</Warning>
+
+### Transfer Stock
+
+Move stock between locations:
+
+```php
+// app/Services/StockMovementService.php:104-224
+
+$movements = app(StockMovementService::class)->transferStock(
+    variant: $variant,
+    fromLocation: $warehouseLocation,
+    toLocation: $storeLocation,
+    quantity: 100,
+    user: auth()->user(),
+    reason: 'Restocking store from warehouse',
+    notes: 'Delivery truck #4521'
+);
+
+// Returns array with both movements:
+// ['out' => StockMovement, 'in' => StockMovement]
+```
+
+<Note>
+Transfers create **two** movement records:
+1. `TRANSFER_OUT` from source location
+2. `TRANSFER_IN` to destination location
+
+Both share the same `reference_number` for easy tracking.
+</Note>
+
+### Record Purchase
+
+Record stock received from supplier with automatic cost calculation:
+
+```php
+// app/Services/StockMovementService.php:231-310
+
+$movement = app(StockMovementService::class)->recordPurchase(
+    variant: $variant,
+    location: $warehouseLocation,
+    packageQuantity: 10,              // Buying 10 boxes
+    packagingType: $boxPackaging,     // Each box has 24 units
+    costPerPackage: 120.00,           // $120 per box
+    user: auth()->user(),
+    notes: 'Invoice #INV-2024-001'
+);
+
+// Automatically calculates:
+// - Base units: 10 boxes × 24 units = 240 units
+// - Cost per unit: $120 / 24 = $5.00 per unit
+// - Updates variant's weighted average cost
+```
+
+<Note>
+The `recordPurchase` method automatically:
+1. Calculates base units from package quantity
+2. Updates the variant's weighted average cost
+3. Increases inventory at the specified location
+4. Creates an audit record with full cost details
+</Note>
+
+### Record Sale
+
+Record stock sold to customers:
+
+```php
+// app/Services/StockMovementService.php:317-399
+
+$movement = app(StockMovementService::class)->recordSale(
+    variant: $variant,
+    location: $storeLocation,
+    quantity: 5,                    // Selling 5 units
+    packagingType: $loosePackaging, // Selling loose units
+    user: auth()->user(),
+    referenceNumber: 'ORD-001',     // Link to order
+    notes: 'Order #ORD-001',
+    releaseReservation: true        // Release reserved stock
+);
+```
+
+<ParamField path="releaseReservation" type="boolean" default="false">
+  If `true`, reduces `reserved_quantity` in addition to `quantity`. Use this when fulfilling orders that had previously reserved stock.
+</ParamField>
+
+### Stock Take
+
+Compare physical count with system count and adjust:
+
+```php
+// app/Services/StockMovementService.php:404-472
+
+$movement = app(StockMovementService::class)->stockTake(
+    variant: $variant,
+    location: $storeLocation,
+    actualQuantity: 95,              // Physical count
+    user: auth()->user(),
+    notes: 'Monthly stock take - Jan 2024'
+);
+
+// If system showed 100 units:
+// - Creates STOCK_TAKE movement for 5 units
+// - Sets location quantity to 95
+// - Records the discrepancy
+
+// If counts match, returns null (no movement needed)
+```
+
+## Inventory Locations
+
+Stock is tracked at specific locations using `app/Models/InventoryLocation.php`:
+
+<ResponseField name="location_type" type="string" required>
+  Polymorphic type (e.g., `App\Models\Shop`, `App\Models\Warehouse`)
+</ResponseField>
+
+<ResponseField name="location_id" type="integer" required>
+  ID of the location (shop_id, warehouse_id, etc.)
+</ResponseField>
+
+<ResponseField name="product_variant_id" type="integer" required>
+  The variant being tracked
+</ResponseField>
+
+<ResponseField name="quantity" type="integer" default="0">
+  Total units at this location
+</ResponseField>
+
+<ResponseField name="reserved_quantity" type="integer" default="0">
+  Units reserved for pending orders
+</ResponseField>
+
+<ResponseField name="available_quantity" type="computed">
+  Available for sale: `quantity - reserved_quantity`
+</ResponseField>
+
+### Reserved Stock
+
+Reserved quantity prevents overselling:
+
+```php
+// app/Models/InventoryLocation.php:67-70
+
+$location->available_quantity; // quantity - reserved_quantity
+
+// Validation ensures reserved never exceeds quantity
+$location->reserved_quantity = 150;
+$location->quantity = 100; // Throws InvalidArgumentException
+```
+
+<Warning>
+The model automatically validates that `reserved_quantity` never exceeds `quantity`. Attempting to save an invalid state throws an exception.
+</Warning>
+
+## Stock Availability
+
+Check if sufficient stock is available:
+
+```php
+// app/Services/StockMovementService.php:523-539
+
+$available = app(StockMovementService::class)->checkStockAvailability(
+    variant: $variant,
+    quantity: 50,
+    shopId: $shop->id // Optional - checks specific shop
+);
+
+if ($available) {
+    // Can fulfill order
+} else {
+    // Insufficient stock
+}
+```
+
+### Get Available Stock
+
+```php
+// app/Services/StockMovementService.php:544-555
+
+$stock = app(StockMovementService::class)->getAvailableStock(
+    variant: $variant,
+    shopId: $shop->id // Optional
+);
+
+// Returns integer or PHP_INT_MAX if track_stock is false
+```
+
+## Viewing Stock Movements
+
+### List All Movements
+
+Display movements with filtering:
+
+```php
+// app/Http/Controllers/StockMovementController.php:38-83
+
+$movements = StockMovement::query()
+    ->where('tenant_id', $tenantId)
+    ->with([
+        'shop:id,name',
+        'productVariant.product',
+        'packagingType',
+        'fromLocation.location',
+        'toLocation.location',
+        'createdBy:id,first_name',
+    ])
+    ->forShop($shopId) // Optional filter
+    ->latest()
+    ->paginate(50);
+```
+
+### View Movement History for a Variant
+
+```php
+// app/Http/Controllers/StockMovementController.php:232-253
+
+$movements = StockMovement::forVariant($variant->id)
+    ->with([
+        'fromLocation.location',
+        'toLocation.location',
+        'createdBy:id,first_name',
+    ])
+    ->latest()
+    ->paginate(20);
+```
+
+## Export Stock Movements
+
+Export movements to CSV:
+
+```php
+// app/Http/Controllers/StockMovementController.php:325-398
+
+// GET /stock-movements/export?variant_id=123
+
+// Downloads CSV with columns:
+// Date, Reference, Product, SKU, Variant, Type, Quantity,
+// Before, After, From Location, To Location, Reason, Notes, Created By
+```
+
+## Reference Number Format
+
+Movements automatically generate unique references:
+
+```php
+// app/Services/StockMovementService.php:574-591
+
+// Format: {PREFIX}-{ULID}
+PUR-01HQXXXXXXXXXXXXXXXXXXX    // Purchase
+SAL-01HQXXXXXXXXXXXXXXXXXXX    // Sale
+ADJ-IN-01HQXXXXXXXXXXXXXXXX    // Adjustment In
+ADJ-OUT-01HQXXXXXXXXXXXXXXX    // Adjustment Out
+TRF-01HQXXXXXXXXXXXXXXXXXXX    // Transfer (both IN and OUT share same ref)
+STK-01HQXXXXXXXXXXXXXXXXXXX    // Stock Take
+PO-SHIP-01HQXXXXXXXXXXXXXXX    // Purchase Order Shipped
+PO-RCV-01HQXXXXXXXXXXXXXXXX    // Purchase Order Received
+```
+
+## Multi-Tenant Isolation
+
+<Warning>
+**CRITICAL**: All stock movement queries MUST filter by `tenant_id`
+</Warning>
+
+```php
+// ✅ CORRECT - Service layer handles tenant isolation
+$movement = app(StockMovementService::class)->adjustStock(...);
+
+// ✅ CORRECT - Manual query with tenant filter
+$movements = StockMovement::query()
+    ->where('tenant_id', auth()->user()->tenant_id)
+    ->get();
+
+// ❌ WRONG - Missing tenant filter
+$movements = StockMovement::all();
+```
+
+## Concurrency and Race Conditions
+
+The service uses pessimistic locking to prevent race conditions:
+
+```php
+// app/Services/StockMovementService.php:46-48
+
+$location = InventoryLocation::where('id', $location->id)
+    ->lockForUpdate()  // Locks row until transaction completes
+    ->firstOrFail();
+```
+
+For transfers, locations are locked in ID order to prevent deadlocks:
+
+```php
+// app/Services/StockMovementService.php:132-138
+
+$lockIds = [$fromLocation->id, $toLocation->id];
+sort($lockIds); // Always lock in same order
+
+$lockedLocations = InventoryLocation::whereIn('id', $lockIds)
+    ->lockForUpdate()
+    ->get()
+    ->keyBy('id');
+```
+
+## Reorder Alerts
+
+After each stock operation, reorder alert cache is cleared:
+
+```php
+// app/Services/StockMovementService.php:87-88
+
+$this->reorderAlertService->clearCache($user->tenant, null);
+```
+
+This ensures the reorder alerts page reflects the latest stock levels.
+
+## Best Practices
+
+<Tabs>
+  <Tab title="Data Integrity">
+    - Never directly update `InventoryLocation.quantity`
+    - Always use `StockMovementService` methods
+    - Use database transactions for multi-step operations
+    - Let the service handle locking and race conditions
+  </Tab>
+  <Tab title="Performance">
+    - Eager load relationships: `with(['productVariant.product', 'fromLocation.location'])`
+    - Use query scopes: `->forShop($shopId)`, `->forVariant($variantId)`
+    - Cache frequently accessed movement summaries
+  </Tab>
+  <Tab title="Audit Trail">
+    - Always provide meaningful `reason` and `notes`
+    - Include reference numbers (invoice, order ID, etc.)
+    - Record who performed the action (`created_by`)
+  </Tab>
+  <Tab title="Security">
+    - Always filter by `tenant_id`
+    - Use Laravel Policies for authorization
+    - Validate location ownership before transfers
+  </Tab>
+</Tabs>
+
+## Related Features
+
+- [Products & Variants](/features/inventory/products) - Product and variant management
+- [Stock Take](/features/inventory/stock-take) - Physical inventory counting
+- [Reorder Alerts](/features/inventory/reorder-alerts) - Low stock notifications

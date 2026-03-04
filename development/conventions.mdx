@@ -1,0 +1,292 @@
+---
+title: Coding Conventions
+description: Architectural patterns and coding standards for ShelfWise development
+---
+
+## Architecture
+
+ShelfWise follows a service-oriented architecture with strict separation of concerns.
+
+### Service Layer Architecture
+
+**Keep controllers thin. Business logic belongs in Services.**
+
+Controllers should only:
+- Validate input via Form Requests
+- Authorize actions via Policies
+- Delegate to Services
+- Return responses
+
+```php app/Http/Controllers/ProductController.php
+public function store(StoreProductRequest $request)
+{
+    Gate::authorize('create', Product::class);
+    $product = $this->productService->createProduct($request->validated());
+    return redirect()->route('products.index');
+}
+```
+
+Services contain all business logic:
+
+```php app/Services/StockMovementService.php
+public function adjustStock(
+    ProductVariant $variant,
+    InventoryLocation $location,
+    int $quantity,
+    StockMovementType $type,
+    User $user,
+    ?string $reason = null
+): StockMovement {
+    return DB::transaction(function () use ($variant, $location, $quantity, $type, $user, $reason) {
+        $location = InventoryLocation::where('id', $location->id)
+            ->lockForUpdate()
+            ->firstOrFail();
+        
+        $quantityBefore = $location->quantity;
+        
+        if ($type->isDecrease() && $location->quantity < $quantity) {
+            throw new Exception('Insufficient stock');
+        }
+        
+        $location->quantity = $type->isIncrease() 
+            ? $location->quantity + $quantity
+            : $location->quantity - $quantity;
+        $location->save();
+        
+        return StockMovement::query()->create([...]);
+    });
+}
+```
+
+### Form Requests
+
+**All validation must use Laravel Form Request classes.**
+
+Form Requests handle:
+- Input validation rules
+- Custom validation messages
+- Tenant-scoped uniqueness checks
+
+<Warning>
+  Form Requests **always** return `true` in `authorize()`. Authorization logic belongs in Policies.
+</Warning>
+
+```php app/Http/Requests/CreateProductRequest.php
+class CreateProductRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return $this->user()->can('create', \App\Models\Product::class);
+    }
+
+    public function rules(): array
+    {
+        $tenantId = $this->user()->tenant_id;
+
+        return [
+            'shop_id' => [
+                'required',
+                Rule::exists('shops', 'id')->where('tenant_id', $tenantId),
+            ],
+            'name' => ['required', 'string', 'max:255'],
+            'sku' => [
+                'required',
+                'string',
+                Rule::unique('product_variants', 'sku')
+                    ->where(fn ($query) => $query->whereExists(
+                        fn ($q) => $q->select(\DB::raw(1))
+                            ->from('products')
+                            ->whereColumn('products.id', 'product_variants.product_id')
+                            ->where('products.tenant_id', $tenantId)
+                    )),
+            ],
+        ];
+    }
+}
+```
+
+### Enums
+
+**Define all enums as PHP Enums in `app/Enums/`. Never use database-level enums.**
+
+```php app/Enums/StockMovementType.php
+enum StockMovementType: string
+{
+    case PURCHASE = 'purchase';
+    case SALE = 'sale';
+    case ADJUSTMENT_IN = 'adjustment_in';
+    case ADJUSTMENT_OUT = 'adjustment_out';
+    
+    public function isIncrease(): bool
+    {
+        return in_array($this, [self::PURCHASE, self::ADJUSTMENT_IN]);
+    }
+}
+```
+
+### UUID Primary Keys
+
+**All models use UUID primary keys via the `HasUuid` trait.**
+
+```php
+use Illuminate\Database\Eloquent\Concerns\HasUuid;
+
+class Product extends Model
+{
+    use HasUuid;
+}
+```
+
+## Multi-Tenancy (CRITICAL)
+
+### Tenant Isolation
+
+**Every database query MUST filter by `tenant_id`:**
+
+```php
+Product::query()->where('tenant_id', auth()->user()->tenant_id)->get();
+app(ProductService::class)->getAllProducts();
+```
+
+<Warning>
+  Never query models without tenant isolation. This is a critical security requirement.
+</Warning>
+
+### Authorization Hierarchy
+
+8-level role system:
+
+```
+Super Admin (999) > Owner (100) > General Manager (80) > Store Manager (60)
+> Assistant Manager (50) > Sales Rep (40) > Inventory Clerk (30) > Cashier (30)
+```
+
+## Database Queries
+
+### Explicit Query Builder
+
+**Always use `Model::query()->` instead of `Model::queryMethod()`:**
+
+```php
+// ✅ Correct
+Product::query()->where('tenant_id', $tenantId)->get();
+Order::query()->find($id);
+Shop::query()->create($data);
+
+// ❌ Incorrect
+Product::where('tenant_id', $tenantId)->get();
+Order::find($id);
+Shop::create($data);
+```
+
+## Stock Management
+
+**Always use `StockMovementService` for audit trail:**
+
+```php
+app(StockMovementService::class)->adjustStock($variant, $location, $qty, $type, $user, $reason);
+```
+
+<Note>
+  Direct manipulation of stock quantities bypasses the audit trail. Always use the service.
+</Note>
+
+## Frontend (Inertia + React)
+
+### Forms
+
+**Use the Inertia `<Form>` component with Wayfinder controllers.**
+
+```tsx
+import { Form } from '@inertiajs/react';
+
+<Form action={route('products.store')} method="post">
+  <input name="name" />
+  <button type="submit">Create Product</button>
+</Form>
+```
+
+For complex forms the `<Form>` component can't handle, use the `useForm` hook.
+
+### Routing
+
+**Actions and routes come from Wayfinder. Do not hardcode routes.**
+
+```tsx
+// ✅ Correct
+route('products.store')
+
+// ❌ Incorrect
+'/products'
+```
+
+### Single Source of Truth
+
+**Extract reusable logic to `lib/` folder:**
+
+- `lib/formatters.ts` - Currency, date, number formatting
+- `lib/status-configs.ts` - Status labels, colors, badges
+- `lib/calculations.ts` - Business calculations
+- `lib/utils.ts` - General utilities
+
+```tsx
+import { formatCurrency, formatDate } from '@/lib/formatters';
+
+formatCurrency(1000, shop.currency_symbol, shop.currency_decimals);
+```
+
+### UI Design
+
+**Use `/frontend-design` skill for any new UI components or pages.**
+
+## Type Definitions
+
+**Single source of truth for types** - Organize types by domain in `resources/js/types/`:
+
+- `types/shop.ts` - Shop, ShopType, StorefrontSettings
+- `types/product.ts` - Product, ProductVariant, ProductCategory
+- `types/order.ts` - Order, OrderItem, OrderPayment
+- `types/payroll.ts` - Payslip, PayRun, WageAdvance, Deductions
+- `types/customer.ts` - Customer, CustomerCredit
+- `types/service.ts` - Service, ServiceVariant, ServiceCategory
+
+### SVG Icons
+
+**Use the named `ReactComponent` export pattern:**
+
+```typescript
+import { ReactComponent as IconName } from './icon.svg?react';
+```
+
+## Code Style
+
+**No single-line comments** - Only use PHPDoc or JSDoc where absolutely necessary.
+
+```php
+// ❌ Avoid this
+// Check if user has permission
+
+// ✅ Use PHPDoc only when needed
+/**
+ * Check stock availability for a variant at a specific shop.
+ */
+public function checkStockAvailability(ProductVariant $variant, int $quantity): bool
+```
+
+## Domain Model Reference
+
+```
+Tenant
+├── User (staff members)
+├── Customer (e-commerce buyers - SEPARATE from User)
+├── Shop
+│   ├── Product → ProductVariant → StockMovement
+│   ├── Service → ServiceVariant
+│   ├── Order → OrderItem → OrderPayment
+│   └── StorefrontSettings
+├── Supplier → SupplierCatalog
+└── Payroll
+    ├── PayRun → PayRunItem
+    ├── Payslip
+    └── WageAdvance
+```

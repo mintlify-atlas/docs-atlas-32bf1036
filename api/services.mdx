@@ -1,0 +1,778 @@
+---
+title: Services
+description: Core service classes that handle business logic in ShelfWise
+---
+
+ShelfWise uses a service layer architecture to keep controllers thin and encapsulate business logic. All services are located in `app/Services/` and handle complex operations, data validation, and coordination between models.
+
+## Core Principles
+
+- **Thin Controllers**: All business logic resides in services
+- **Transaction Management**: Critical operations use database transactions
+- **Cache Invalidation**: Services handle cache management automatically
+- **Tenant Isolation**: All operations are tenant-scoped for security
+- **Audit Logging**: Services log all significant operations
+
+---
+
+## ProductService
+
+Manages product creation, updates, variants, and packaging types.
+
+**Location**: `app/Services/ProductService.php`
+
+### create()
+
+Creates a new product with variants and packaging types.
+
+<ParamField path="data" type="array" required>
+  Product data including name, type, variants, and packaging
+  
+  <Expandable title="data properties">
+    <ParamField path="name" type="string" required>
+      Product name
+    </ParamField>
+    <ParamField path="product_type_slug" type="string" required>
+      Product type slug (e.g., 'general', 'pharmacy', 'retail')
+    </ParamField>
+    <ParamField path="category_id" type="int">
+      Product category ID
+    </ParamField>
+    <ParamField path="description" type="string">
+      Product description
+    </ParamField>
+    <ParamField path="has_variants" type="bool" default="false">
+      Whether product has multiple variants
+    </ParamField>
+    <ParamField path="is_active" type="bool" default="true">
+      Product active status
+    </ParamField>
+    <ParamField path="custom_attributes" type="array">
+      Type-specific attributes
+    </ParamField>
+    <ParamField path="variants" type="array">
+      Array of variant data (if has_variants is true)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="tenant" type="Tenant" required>
+  The tenant instance
+</ParamField>
+
+<ParamField path="shop" type="Shop" required>
+  The shop instance
+</ParamField>
+
+<ResponseField name="return" type="Product">
+  Created product with relationships loaded
+</ResponseField>
+
+```php
+use App\Services\ProductService;
+
+$productService = app(ProductService::class);
+
+$product = $productService->create([
+    'name' => 'Pain Relief Tablets',
+    'product_type_slug' => 'pharmacy',
+    'category_id' => 5,
+    'description' => '500mg paracetamol tablets',
+    'has_variants' => false,
+    'sku' => 'MED-001',
+    'price' => 15.99,
+    'cost_price' => 8.50,
+    'base_unit_name' => 'Pack',
+    'custom_attributes' => [
+        'requires_prescription' => false,
+        'drug_class' => 'analgesic',
+    ],
+], $tenant, $shop);
+```
+
+### update()
+
+Updates an existing product.
+
+<ParamField path="product" type="Product" required>
+  The product to update
+</ParamField>
+
+<ParamField path="data" type="array" required>
+  Updated product data
+</ParamField>
+
+<ResponseField name="return" type="Product">
+  Updated product with fresh relationships
+</ResponseField>
+
+```php
+$product = $productService->update($product, [
+    'name' => 'Updated Product Name',
+    'description' => 'New description',
+    'is_active' => true,
+]);
+```
+
+### updateVariant()
+
+Updates a product variant. Automatically adjusts packaging type prices if variant price changes.
+
+<ParamField path="variant" type="ProductVariant" required>
+  The variant to update
+</ParamField>
+
+<ParamField path="data" type="array" required>
+  Updated variant data
+</ParamField>
+
+<ResponseField name="return" type="ProductVariant">
+  Updated variant with relationships
+</ResponseField>
+
+```php
+$variant = $productService->updateVariant($variant, [
+    'price' => 25.00,
+    'cost_price' => 12.00,
+    'reorder_level' => 50,
+]);
+```
+
+---
+
+## OrderService
+
+Handles order lifecycle management including creation, status transitions, and fulfillment.
+
+**Location**: `app/Services/OrderService.php`
+
+### createOrder()
+
+Creates a new order with items.
+
+<ParamField path="tenant" type="Tenant" required>
+  Tenant instance
+</ParamField>
+
+<ParamField path="shop" type="Shop" required>
+  Shop instance
+</ParamField>
+
+<ParamField path="items" type="array" required>
+  Array of order items
+  
+  <Expandable title="item properties">
+    <ParamField path="sellable_type" type="string" required>
+      ProductVariant or ServiceVariant class name
+    </ParamField>
+    <ParamField path="sellable_id" type="int" required>
+      ID of the sellable item
+    </ParamField>
+    <ParamField path="quantity" type="int" required>
+      Quantity ordered
+    </ParamField>
+    <ParamField path="unit_price" type="float">
+      Override price (defaults to sellable price)
+    </ParamField>
+    <ParamField path="discount_amount" type="float" default="0">
+      Line item discount
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="createdBy" type="User" required>
+  User creating the order
+</ParamField>
+
+<ParamField path="customer" type="User">
+  Customer user (optional)
+</ParamField>
+
+<ResponseField name="return" type="Order">
+  Created order with items and totals calculated
+</ResponseField>
+
+```php
+use App\Services\OrderService;
+
+$orderService = app(OrderService::class);
+
+$order = $orderService->createOrder(
+    tenant: $tenant,
+    shop: $shop,
+    items: [
+        [
+            'sellable_type' => ProductVariant::class,
+            'sellable_id' => 123,
+            'quantity' => 2,
+            'unit_price' => 50.00,
+        ],
+    ],
+    createdBy: auth()->user(),
+    customer: $customer,
+    customerNotes: 'Handle with care',
+    shippingCost: 10.00
+);
+```
+
+### confirmOrder()
+
+Confirms an order and reserves inventory.
+
+<ParamField path="order" type="Order" required>
+  Order to confirm
+</ParamField>
+
+<ParamField path="user" type="User" required>
+  User confirming the order
+</ParamField>
+
+<ResponseField name="return" type="Order">
+  Confirmed order with reserved inventory
+</ResponseField>
+
+<Accordion title="Stock Reservation Logic">
+  When an order is confirmed:
+  1. Uses pessimistic locking to prevent race conditions
+  2. Checks available stock (quantity - reserved_quantity)
+  3. Atomically increments reserved_quantity
+  4. Throws exception if insufficient stock
+  5. Updates order status to CONFIRMED
+</Accordion>
+
+```php
+$order = $orderService->confirmOrder($order, auth()->user());
+```
+
+### fulfillOrder()
+
+Fulfills a confirmed order by deducting inventory and creating stock movements.
+
+<ParamField path="order" type="Order" required>
+  Confirmed order to fulfill
+</ParamField>
+
+<ParamField path="user" type="User" required>
+  User fulfilling the order
+</ParamField>
+
+<ResponseField name="return" type="Order">
+  Fulfilled order with status updated to PROCESSING
+</ResponseField>
+
+```php
+$order = $orderService->fulfillOrder($order, auth()->user());
+```
+
+### cancelOrder()
+
+Cancels an order and releases reserved inventory.
+
+<ParamField path="order" type="Order" required>
+  Order to cancel
+</ParamField>
+
+<ParamField path="user" type="User" required>
+  User canceling the order
+</ParamField>
+
+<ParamField path="reason" type="string">
+  Cancellation reason
+</ParamField>
+
+<ResponseField name="return" type="Order">
+  Cancelled order
+</ResponseField>
+
+```php
+$order = $orderService->cancelOrder(
+    $order, 
+    auth()->user(), 
+    'Customer requested cancellation'
+);
+```
+
+---
+
+## CustomerService
+
+Manages customer accounts, addresses, credit limits, and search.
+
+**Location**: `app/Services/CustomerService.php`
+
+### create()
+
+Creates a new customer account.
+
+<ParamField path="data" type="array" required>
+  Customer data
+  
+  <Expandable title="data properties">
+    <ParamField path="first_name" type="string" required>
+      Customer first name
+    </ParamField>
+    <ParamField path="last_name" type="string" required>
+      Customer last name
+    </ParamField>
+    <ParamField path="email" type="string" required>
+      Customer email (must be unique per tenant)
+    </ParamField>
+    <ParamField path="phone" type="string">
+      Customer phone number
+    </ParamField>
+    <ParamField path="password" type="string" required>
+      Customer password (will be hashed)
+    </ParamField>
+    <ParamField path="preferred_shop_id" type="int">
+      Default shop for customer
+    </ParamField>
+    <ParamField path="credit_limit" type="float">
+      Customer credit limit
+    </ParamField>
+    <ParamField path="address" type="array">
+      Primary address data
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="tenant" type="Tenant" required>
+  Tenant instance
+</ParamField>
+
+<ResponseField name="return" type="Customer">
+  Created customer with address
+</ResponseField>
+
+```php
+use App\Services\CustomerService;
+
+$customerService = app(CustomerService::class);
+
+$customer = $customerService->create([
+    'first_name' => 'John',
+    'last_name' => 'Doe',
+    'email' => 'john@example.com',
+    'phone' => '+2348012345678',
+    'password' => 'password123',
+    'preferred_shop_id' => 1,
+    'credit_limit' => 50000.00,
+    'address' => [
+        'street' => '123 Main Street',
+        'city' => 'Lagos',
+        'state' => 'Lagos',
+        'postal_code' => '100001',
+    ],
+], $tenant);
+```
+
+### list()
+
+Get paginated customer list with filters.
+
+<ParamField path="tenant" type="Tenant" required>
+  Tenant instance
+</ParamField>
+
+<ParamField path="requester" type="User" required>
+  User requesting the list
+</ParamField>
+
+<ParamField path="filters" type="array">
+  Filter options
+  
+  <Expandable title="filter options">
+    <ParamField path="search" type="string">
+      Search by name, email, or phone
+    </ParamField>
+    <ParamField path="status" type="string">
+      Filter by 'active' or 'inactive'
+    </ParamField>
+    <ParamField path="has_credit" type="string">
+      Filter by 'yes' or 'no'
+    </ParamField>
+    <ParamField path="shop_id" type="int">
+      Filter by preferred shop
+    </ParamField>
+    <ParamField path="per_page" type="int" default="15">
+      Items per page
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="return" type="LengthAwarePaginator">
+  Paginated customer collection
+</ResponseField>
+
+```php
+$customers = $customerService->list($tenant, auth()->user(), [
+    'search' => 'john',
+    'status' => 'active',
+    'per_page' => 25,
+]);
+```
+
+---
+
+## POSService
+
+Handles Point-of-Sale operations including quick sales and session management.
+
+**Location**: `app/Services/POSService.php`
+
+### createQuickSale()
+
+Creates an immediate sale with payment and stock deduction.
+
+<ParamField path="shop" type="Shop" required>
+  Shop where sale is occurring
+</ParamField>
+
+<ParamField path="items" type="array" required>
+  Array of sale items
+</ParamField>
+
+<ParamField path="customerId" type="int">
+  Customer ID (optional)
+</ParamField>
+
+<ParamField path="paymentMethod" type="string" default="cash">
+  Payment method (cash, card, mobile_money)
+</ParamField>
+
+<ParamField path="amountTendered" type="float" default="0">
+  Cash amount tendered
+</ParamField>
+
+<ParamField path="options" type="array">
+  Additional options (discount_amount, notes, etc.)
+</ParamField>
+
+<ResponseField name="return" type="Order">
+  Completed order with DELIVERED status
+</ResponseField>
+
+<Accordion title="POS Sale Process">
+  1. Validates stock availability using pessimistic locking
+  2. Creates order with DELIVERED status
+  3. Calculates totals including tax and discounts
+  4. Creates order items
+  5. Records stock movements
+  6. Creates payment record
+  7. Returns completed order
+</Accordion>
+
+```php
+use App\Services\POSService;
+
+$posService = app(POSService::class);
+
+$order = $posService->createQuickSale(
+    shop: $shop,
+    items: [
+        [
+            'variant_id' => 123,
+            'quantity' => 2,
+            'unit_price' => 50.00,
+            'packaging_type_id' => 1,
+        ],
+    ],
+    customerId: 45,
+    paymentMethod: 'cash',
+    amountTendered: 120.00,
+    options: [
+        'discount_amount' => 10.00,
+        'notes' => 'Loyalty discount applied',
+    ]
+);
+```
+
+### getSessionSummary()
+
+Get sales summary for current user's POS session.
+
+<ParamField path="shop" type="Shop" required>
+  Shop instance
+</ParamField>
+
+<ParamField path="startDate" type="string">
+  Start date (YYYY-MM-DD)
+</ParamField>
+
+<ParamField path="endDate" type="string">
+  End date (YYYY-MM-DD)
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Session statistics including total sales, revenue, and payment method breakdowns
+</ResponseField>
+
+```php
+$summary = $posService->getSessionSummary(
+    $shop,
+    startDate: '2024-03-01',
+    endDate: '2024-03-01'
+);
+
+// Returns:
+// [
+//   'total_sales' => 45,
+//   'total_revenue' => 125000.00,
+//   'total_tax' => 9375.00,
+//   'cash_sales' => 80000.00,
+//   'card_sales' => 45000.00,
+//   'mobile_money_sales' => 0.00,
+//   'orders' => Collection,
+// ]
+```
+
+---
+
+## CartService
+
+Manages shopping cart operations for e-commerce storefronts.
+
+**Location**: `app/Services/CartService.php`
+
+### getCart()
+
+Retrieves or creates a cart for the current session or customer.
+
+<ParamField path="shop" type="Shop" required>
+  Shop instance
+</ParamField>
+
+<ParamField path="customerId" type="int">
+  Customer ID for logged-in users
+</ParamField>
+
+<ResponseField name="return" type="Cart">
+  Cart instance
+</ResponseField>
+
+```php
+use App\Services\CartService;
+
+$cartService = app(CartService::class);
+
+// Guest cart (session-based)
+$cart = $cartService->getCart($shop);
+
+// Customer cart
+$cart = $cartService->getCart($shop, $customerId);
+```
+
+### addItem()
+
+Adds a product to the cart.
+
+<ParamField path="cart" type="Cart" required>
+  Cart instance
+</ParamField>
+
+<ParamField path="variantId" type="int" required>
+  Product variant ID
+</ParamField>
+
+<ParamField path="quantity" type="int" default="1">
+  Quantity to add
+</ParamField>
+
+<ParamField path="packagingTypeId" type="int">
+  Packaging type ID (optional)
+</ParamField>
+
+<ResponseField name="return" type="CartItem">
+  Created or updated cart item
+</ResponseField>
+
+```php
+$cartItem = $cartService->addItem(
+    cart: $cart,
+    variantId: 123,
+    quantity: 2,
+    packagingTypeId: 5
+);
+```
+
+### getCartSummary()
+
+Calculates cart totals including shipping and tax.
+
+<ParamField path="cart" type="Cart" required>
+  Cart instance
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Cart summary with items, subtotal, shipping, tax, and total
+</ResponseField>
+
+```php
+$summary = $cartService->getCartSummary($cart);
+
+// Returns:
+// [
+//   'items' => Collection,
+//   'subtotal' => 5000.00,
+//   'shipping_fee' => 500.00,
+//   'tax' => 375.00,
+//   'total' => 5875.00,
+//   'item_count' => 3,
+// ]
+```
+
+### mergeGuestCartIntoCustomerCart()
+
+Merges a guest cart into a customer cart upon login.
+
+<ParamField path="sessionId" type="string" required>
+  Guest session ID
+</ParamField>
+
+<ParamField path="customerId" type="int" required>
+  Customer ID
+</ParamField>
+
+<ParamField path="shopId" type="int" required>
+  Shop ID
+</ParamField>
+
+<ResponseField name="return" type="Cart">
+  Merged customer cart
+</ResponseField>
+
+```php
+$cart = $cartService->mergeGuestCartIntoCustomerCart(
+    sessionId: session()->getId(),
+    customerId: auth()->id(),
+    shopId: $shop->id
+);
+```
+
+---
+
+## Additional Services
+
+<Tabs>
+  <Tab title="StockMovementService">
+    **Location**: `app/Services/StockMovementService.php`
+    
+    Handles all inventory adjustments with audit trails.
+    
+    ### Key Methods
+    
+    - `adjustStock()` - Record inventory changes
+    - `recordSale()` - Record sale stock movement
+    - `checkStockAvailability()` - Validate stock levels
+    - `getAvailableStock()` - Get current available quantity
+    
+    ```php
+    use App\Services\StockMovementService;
+    use App\Enums\StockMovementType;
+    
+    $service = app(StockMovementService::class);
+    
+    $service->adjustStock(
+        variant: $variant,
+        location: $location,
+        quantity: 50,
+        type: StockMovementType::ADJUSTMENT,
+        user: auth()->user(),
+        referenceNumber: 'ADJ-001',
+        notes: 'Stock count adjustment'
+    );
+    ```
+  </Tab>
+  
+  <Tab title="PayrollService">
+    **Location**: `app/Services/PayrollService.php`
+    
+    Manages payroll calculations, pay runs, and payslips.
+    
+    ### Key Methods
+    
+    - `createPayRun()` - Create new pay run
+    - `calculatePayslip()` - Calculate employee payslip
+    - `approvePayRun()` - Approve and finalize pay run
+    - `generatePayslips()` - Generate payslips for pay run
+  </Tab>
+  
+  <Tab title="ReportService">
+    **Location**: `app/Services/ReportService.php`
+    
+    Generates business intelligence reports.
+    
+    ### Key Methods
+    
+    - `salesReport()` - Sales analytics
+    - `inventoryReport()` - Stock levels and movements
+    - `profitLossReport()` - P&L statement
+    - `customerReport()` - Customer analytics
+  </Tab>
+  
+  <Tab title="TaxService">
+    **Location**: `app/Services/TaxService.php`
+    
+    Handles Nigerian tax calculations including PAYE, WHT, and VAT.
+    
+    ### Key Methods
+    
+    - `calculatePAYE()` - Personal income tax
+    - `calculateNHF()` - National Housing Fund
+    - `calculatePension()` - Pension contributions
+    - `calculateVAT()` - Value Added Tax
+  </Tab>
+</Tabs>
+
+---
+
+## Service Best Practices
+
+<Accordion title="Transaction Management">
+  All services use database transactions for data consistency:
+  
+  ```php
+  return DB::transaction(function () use ($data) {
+      // Multiple database operations
+      $model = Model::create($data);
+      $related = $model->related()->create($relatedData);
+      
+      // All succeed or all fail
+      return $model;
+  });
+  ```
+</Accordion>
+
+<Accordion title="Cache Invalidation">
+  Services automatically invalidate relevant caches:
+  
+  ```php
+  Cache::tags([
+      "tenant:{$tenantId}:products:list",
+      "tenant:{$tenantId}:product:{$productId}",
+  ])->flush();
+  ```
+</Accordion>
+
+<Accordion title="Tenant Isolation">
+  All queries are scoped to the current tenant:
+  
+  ```php
+  Product::query()
+      ->where('tenant_id', $tenant->id)
+      ->where('shop_id', $shop->id)
+      ->get();
+  ```
+</Accordion>
+
+<Accordion title="Error Handling">
+  Services throw exceptions with clear messages:
+  
+  ```php
+  if (!$order->canEdit()) {
+      throw new Exception(
+          'Order cannot be edited in current status: ' . 
+          $order->status->value
+      );
+  }
+  ```
+</Accordion>

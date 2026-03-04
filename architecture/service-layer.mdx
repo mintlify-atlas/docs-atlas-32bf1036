@@ -1,0 +1,334 @@
+---
+title: Service Layer Pattern
+description: Learn how ShelfWise uses the Service Layer pattern to keep controllers thin and business logic centralized
+---
+
+## Overview
+
+ShelfWise follows a strict **Service Layer Architecture** where all business logic resides in dedicated service classes, keeping controllers thin and focused on request/response handling. This pattern ensures code reusability, testability, and maintainability.
+
+<Note>
+  **Core Principle**: Controllers should never contain business logic. They orchestrate services and handle HTTP concerns only.
+</Note>
+
+## Architecture Pattern
+
+```
+Controller (HTTP Layer)
+    ↓ validates & authorizes
+Service Layer (Business Logic)
+    ↓ orchestrates
+Models & Database (Data Layer)
+```
+
+### Controller Responsibilities
+
+- Validate incoming requests via Form Requests
+- Authorize actions using Laravel Gates/Policies
+- Call service methods with validated data
+- Return appropriate HTTP responses
+
+### Service Responsibilities
+
+- Implement all business logic
+- Coordinate multiple models and operations
+- Handle database transactions
+- Manage complex calculations and workflows
+- Log important operations
+
+## Real-World Example: ProductService
+
+Here's how the `ProductService` handles product creation:
+
+```php app/Services/ProductService.php
+namespace App\Services;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+class ProductService
+{
+    public function create(array $data, Tenant $tenant, Shop $shop): Product
+    {
+        Log::info('Product creation process started.', [
+            'tenant_id' => $tenant->id,
+            'shop_id' => $shop->id,
+        ]);
+
+        try {
+            return DB::transaction(function () use ($data, $tenant, $shop) {
+                $productType = $this->resolveProductType($data['product_type_slug'], $tenant);
+                $slug = $this->generateUniqueSlug($data['name'], $tenant);
+
+                $productData = [
+                    'tenant_id' => $tenant->id,
+                    'shop_id' => $shop->id,
+                    'product_type_id' => $productType->id,
+                    'name' => $data['name'],
+                    'slug' => $slug,
+                    'has_variants' => $data['has_variants'] ?? false,
+                ];
+
+                $product = Product::query()->create($productData);
+
+                if ($product->has_variants && isset($data['variants'])) {
+                    foreach ($data['variants'] as $variantData) {
+                        $this->createVariant($product, $variantData);
+                    }
+                } else {
+                    $this->createDefaultVariant($product, $data);
+                }
+
+                Log::info('Product created successfully.', ['product_id' => $product->id]);
+
+                return $product->load('type', 'category', 'variants');
+            });
+        } catch (Throwable $e) {
+            Log::error('Product creation failed.', ['exception' => $e]);
+            throw $e;
+        }
+    }
+}
+```
+
+### Key Features Demonstrated
+
+<AccordionGroup>
+  <Accordion title="Database Transactions">
+    All complex operations that modify multiple tables are wrapped in `DB::transaction()` to ensure atomicity. If any step fails, all changes are rolled back.
+
+    ```php
+    DB::transaction(function () {
+        // All database operations here
+        // Either all succeed or all rollback
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Comprehensive Logging">
+    Services log both successful operations and failures with contextual data for debugging:
+
+    ```php
+    Log::info('Product creation process started.', ['tenant_id' => $tenant->id]);
+    Log::error('Product creation failed.', ['exception' => $e]);
+    ```
+  </Accordion>
+
+  <Accordion title="Private Helper Methods">
+    Complex logic is broken down into private methods that are tested and reused:
+
+    ```php
+    private function generateUniqueSlug(string $name, Tenant $tenant): string
+    private function createVariant(Product $product, array $data): ProductVariant
+    ```
+  </Accordion>
+
+  <Accordion title="Eager Loading">
+    Services return models with relationships pre-loaded to prevent N+1 queries:
+
+    ```php
+    return $product->load('type', 'category', 'variants.packagingTypes');
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Service Layer Best Practices
+
+### 1. Dependency Injection
+
+Services receive dependencies through constructor injection:
+
+```php app/Services/OrderService.php
+class OrderService
+{
+    public function __construct(
+        private readonly StockMovementService $stockMovementService
+    ) {}
+
+    public function fulfillOrder(Order $order, User $user): Order
+    {
+        // Use injected service
+        $this->stockMovementService->adjustStock(
+            $variant,
+            $location,
+            $quantity,
+            StockMovementType::SALE,
+            $user,
+            "Order #{$order->order_number}"
+        );
+    }
+}
+```
+
+### 2. Type Hints and Return Types
+
+Always use strict type hints and return types:
+
+```php
+public function createOrder(
+    Tenant $tenant,
+    Shop $shop,
+    array $items,
+    User $createdBy,
+    ?User $customer = null
+): Order {
+    // Method implementation
+}
+```
+
+### 3. Exception Handling
+
+Services catch exceptions, log them, and re-throw for the controller to handle:
+
+```php
+try {
+    return DB::transaction(function () use ($data) {
+        // Business logic
+    });
+} catch (Throwable $e) {
+    Log::error('Operation failed.', ['exception' => $e]);
+    throw $e;
+}
+```
+
+### 4. Explicit Query Builder Usage
+
+<Warning>
+  Always use `Model::query()` instead of static methods like `Model::where()` for consistency and clarity.
+</Warning>
+
+```php
+// ✅ Correct
+Product::query()->where('tenant_id', $tenantId)->get();
+Order::query()->find($id);
+Shop::query()->create($data);
+
+// ❌ Incorrect
+Product::where('tenant_id', $tenantId)->get();
+Order::find($id);
+Shop::create($data);
+```
+
+## Common Service Patterns
+
+### Orchestrating Multiple Operations
+
+Services coordinate complex workflows across multiple models:
+
+```php app/Services/OrderService.php
+public function confirmOrder(Order $order, User $user): Order
+{
+    return DB::transaction(function () use ($order) {
+        foreach ($order->items as $item) {
+            $variant = $item->productVariant;
+            
+            // Use lockForUpdate to prevent race conditions
+            $location = $variant->inventoryLocations()
+                ->where('location_type', 'App\\Models\\Shop')
+                ->where('location_id', $order->shop_id)
+                ->lockForUpdate()
+                ->first();
+
+            // Check available stock
+            $availableStock = $location->quantity - $location->reserved_quantity;
+            if ($availableStock < $item->quantity) {
+                throw new Exception("Insufficient stock for variant {$variant->sku}");
+            }
+
+            // Use atomic increment to prevent race conditions
+            $location->increment('reserved_quantity', $item->quantity);
+        }
+
+        $order->status = OrderStatus::CONFIRMED;
+        $order->confirmed_at = now();
+        $order->save();
+
+        return $order;
+    });
+}
+```
+
+### Caching Strategies
+
+Services implement caching for expensive operations:
+
+```php app/Services/ProductService.php
+private function resolveProductType(string $slug, Tenant $tenant): ProductType
+{
+    $cacheKey = "tenant:$tenant->id:product_type:slug:$slug";
+
+    return Cache::tags(["tenant:$tenant->id:product_types"])
+        ->remember($cacheKey, 3600, function () use ($slug, $tenant) {
+            return ProductType::accessibleTo($tenant->id)
+                ->where('slug', $slug)
+                ->firstOrFail();
+        });
+}
+```
+
+### Invalidating Cache
+
+When data changes, services invalidate relevant cache tags:
+
+```php
+Cache::tags([
+    "tenant:$product->tenant_id:products:list",
+    "tenant:$product->tenant_id:product:$product->id",
+])->flush();
+```
+
+## Testing Services
+
+Services are designed to be easily testable:
+
+```php tests/Feature/Services/ProductServiceTest.php
+use App\Services\ProductService;
+
+test('creates product with variants', function () {
+    $tenant = Tenant::factory()->create();
+    $shop = Shop::factory()->for($tenant)->create();
+    
+    $service = app(ProductService::class);
+    
+    $product = $service->create([
+        'name' => 'Test Product',
+        'product_type_slug' => 'simple',
+        'has_variants' => true,
+        'variants' => [
+            ['sku' => 'TEST-001', 'price' => 10.00],
+        ],
+    ], $tenant, $shop);
+    
+    expect($product->variants)->toHaveCount(1);
+    expect($product->tenant_id)->toBe($tenant->id);
+});
+```
+
+## Service Discovery
+
+Services are automatically resolved via Laravel's service container:
+
+```php
+// In controllers
+public function __construct(
+    private readonly ProductService $productService
+) {}
+
+// Using app() helper
+$service = app(ProductService::class);
+
+// Using dependency injection in other services
+class OrderService
+{
+    public function __construct(
+        private readonly StockMovementService $stockMovementService,
+        private readonly NotificationService $notificationService
+    ) {}
+}
+```
+
+## Related Patterns
+
+- [Multi-Tenancy](/architecture/multi-tenancy) - How services ensure tenant isolation
+- [Authorization](/architecture/authorization) - How controllers authorize before calling services
+- [Database Schema](/architecture/database-schema) - Understanding the data layer

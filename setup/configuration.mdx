@@ -1,0 +1,612 @@
+---
+title: "Configuration"
+description: "Configure ShelfWise for your environment including mail, queues, storage, and more"
+---
+
+After installing ShelfWise, configure the application settings to match your deployment environment.
+
+## Environment Configuration
+
+All configuration is managed through the `.env` file in your project root. This file is created by copying `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+<Warning>
+  Never commit `.env` to version control. It contains sensitive credentials.
+</Warning>
+
+## Core Application Settings
+
+### Application Identity
+
+```bash .env
+APP_NAME=ShelfWise
+APP_ENV=production
+APP_KEY=base64:generated_key_here
+APP_DEBUG=false
+APP_URL=https://yourdomain.com
+```
+
+<Note>
+  Generate `APP_KEY` with `php artisan key:generate`. This key encrypts session data, cookies, and other sensitive information.
+</Note>
+
+**Configuration Options:**
+
+- `APP_ENV`: Set to `local`, `staging`, or `production`
+- `APP_DEBUG`: **Must be `false` in production** to prevent exposing sensitive data
+- `APP_URL`: Your application's public URL (used in emails, PDFs, and API responses)
+
+### Locale and Timezone
+
+```bash .env
+APP_LOCALE=en
+APP_FALLBACK_LOCALE=en
+APP_FAKER_LOCALE=en_US
+APP_TIMEZONE=UTC
+```
+
+For timezone configuration, edit `config/app.php`:
+
+```php config/app.php
+'timezone' => env('APP_TIMEZONE', 'UTC'),
+```
+
+<Info>
+  Store all timestamps in UTC and convert to user's timezone in the frontend. ShelfWise follows this best practice.
+</Info>
+
+## Database Configuration
+
+ShelfWise supports SQLite, MySQL, and PostgreSQL.
+
+<Tabs>
+  <Tab title="MySQL (Recommended)">
+    ```bash .env
+    DB_CONNECTION=mysql
+    DB_HOST=127.0.0.1
+    DB_PORT=3306
+    DB_DATABASE=shelfwise
+    DB_USERNAME=shelfwise_user
+    DB_PASSWORD=secure_password_here
+    ```
+
+    **Optimization for Production:**
+
+    Edit `config/database.php` to tune MySQL connection:
+
+    ```php config/database.php
+    'mysql' => [
+        'driver' => 'mysql',
+        'host' => env('DB_HOST', '127.0.0.1'),
+        'port' => env('DB_PORT', '3306'),
+        'database' => env('DB_DATABASE', 'forge'),
+        'username' => env('DB_USERNAME', 'forge'),
+        'password' => env('DB_PASSWORD', ''),
+        'charset' => 'utf8mb4',
+        'collation' => 'utf8mb4_unicode_ci',
+        'prefix' => '',
+        'strict' => true,
+        'engine' => 'InnoDB',
+        'options' => extension_loaded('pdo_mysql') ? array_filter([
+            PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+            PDO::ATTR_EMULATE_PREPARES => true,
+        ]) : [],
+    ],
+    ```
+  </Tab>
+
+  <Tab title="PostgreSQL">
+    ```bash .env
+    DB_CONNECTION=pgsql
+    DB_HOST=127.0.0.1
+    DB_PORT=5432
+    DB_DATABASE=shelfwise
+    DB_USERNAME=shelfwise_user
+    DB_PASSWORD=secure_password_here
+    ```
+  </Tab>
+
+  <Tab title="SQLite (Dev Only)">
+    ```bash .env
+    DB_CONNECTION=sqlite
+    # DB_DATABASE path is auto-detected as database/database.sqlite
+    ```
+
+    <Warning>
+      SQLite is suitable for development only. Do not use in production.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Queue Configuration
+
+ShelfWise uses queues for background jobs like sending emails, generating reports, and processing exports.
+
+### Queue Driver Options
+
+<Tabs>
+  <Tab title="Database (Development)">
+    Uses the database for queue storage. Suitable for development and small deployments.
+
+    ```bash .env
+    QUEUE_CONNECTION=database
+    ```
+
+    Run the queue worker:
+    ```bash
+    php artisan queue:work
+    ```
+
+    Or use the dev script which includes queue worker:
+    ```bash
+    composer dev
+    ```
+  </Tab>
+
+  <Tab title="Redis (Production)">
+    Recommended for production. Much faster than database queues.
+
+    ```bash .env
+    QUEUE_CONNECTION=redis
+
+    REDIS_HOST=127.0.0.1
+    REDIS_PASSWORD=null
+    REDIS_PORT=6379
+    REDIS_CLIENT=phpredis
+    ```
+
+    **Install Redis PHP extension:**
+    ```bash
+    sudo apt install php8.2-redis
+    sudo systemctl restart php8.2-fpm
+    ```
+
+    **Set up Supervisor for queue workers:**
+
+    Create `/etc/supervisor/conf.d/shelfwise-worker.conf`:
+
+    ```ini
+    [program:shelfwise-worker]
+    process_name=%(program_name)s_%(process_num)02d
+    command=php /var/www/shelfwise/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
+    autostart=true
+    autorestart=true
+    stopasgroup=true
+    killasgroup=true
+    user=www-data
+    numprocs=4
+    redirect_stderr=true
+    stdout_logfile=/var/www/shelfwise/storage/logs/worker.log
+    stopwaitsecs=3600
+    ```
+
+    Start workers:
+    ```bash
+    sudo supervisorctl reread
+    sudo supervisorctl update
+    sudo supervisorctl start shelfwise-worker:*
+    ```
+  </Tab>
+</Tabs>
+
+### Queue Monitoring
+
+Restart queue workers after deploying code changes:
+
+```bash
+php artisan queue:restart
+```
+
+## Cache Configuration
+
+Caching improves performance by storing frequently accessed data in memory.
+
+<Tabs>
+  <Tab title="Database (Development)">
+    ```bash .env
+    CACHE_STORE=database
+    ```
+
+    Create cache table:
+    ```bash
+    php artisan cache:table
+    php artisan migrate
+    ```
+  </Tab>
+
+  <Tab title="Redis (Production)">
+    ```bash .env
+    CACHE_STORE=redis
+    
+    REDIS_HOST=127.0.0.1
+    REDIS_PASSWORD=null
+    REDIS_PORT=6379
+    ```
+
+    Redis provides significant performance improvements for cache operations.
+  </Tab>
+</Tabs>
+
+### Cache Commands
+
+```bash
+# Clear application cache
+php artisan cache:clear
+
+# Cache configuration files (production)
+php artisan config:cache
+
+# Cache routes (production)
+php artisan route:cache
+
+# Cache views (production)
+php artisan view:cache
+
+# Clear all caches
+php artisan optimize:clear
+```
+
+<Warning>
+  Run `php artisan config:cache` in production after any `.env` changes. Cached config takes precedence over `.env` values.
+</Warning>
+
+## Session Configuration
+
+```bash .env
+SESSION_DRIVER=database
+SESSION_LIFETIME=120
+SESSION_ENCRYPT=false
+SESSION_PATH=/
+SESSION_DOMAIN=null
+```
+
+**Session Driver Options:**
+
+- `database` - Store sessions in database (default, requires `sessions` table)
+- `redis` - Store in Redis (recommended for production with Redis)
+- `file` - Store in `storage/framework/sessions`
+- `cookie` - Encrypted session data in cookies
+
+<Info>
+  ShelfWise uses database sessions by default. The `sessions` table is created automatically when running migrations.
+</Info>
+
+## Mail Configuration
+
+ShelfWise sends emails for:
+- Password resets
+- User invitations
+- Order confirmations
+- Purchase order notifications
+- Payslip delivery
+
+<Tabs>
+  <Tab title="SMTP">
+    ```bash .env
+    MAIL_MAILER=smtp
+    MAIL_HOST=smtp.mailtrap.io
+    MAIL_PORT=2525
+    MAIL_USERNAME=your_username
+    MAIL_PASSWORD=your_password
+    MAIL_ENCRYPTION=tls
+    MAIL_FROM_ADDRESS=noreply@yourdomain.com
+    MAIL_FROM_NAME="${APP_NAME}"
+    ```
+
+    **Popular SMTP Providers:**
+
+    <AccordionGroup>
+      <Accordion title="Gmail">
+        ```bash
+        MAIL_HOST=smtp.gmail.com
+        MAIL_PORT=587
+        MAIL_ENCRYPTION=tls
+        MAIL_USERNAME=your-email@gmail.com
+        MAIL_PASSWORD=your-app-password
+        ```
+
+        <Note>
+          Use an [App Password](https://support.google.com/accounts/answer/185833) instead of your regular Gmail password.
+        </Note>
+      </Accordion>
+
+      <Accordion title="SendGrid">
+        ```bash
+        MAIL_HOST=smtp.sendgrid.net
+        MAIL_PORT=587
+        MAIL_USERNAME=apikey
+        MAIL_PASSWORD=your_sendgrid_api_key
+        MAIL_ENCRYPTION=tls
+        ```
+      </Accordion>
+
+      <Accordion title="Mailgun">
+        ```bash
+        MAIL_MAILER=mailgun
+        MAILGUN_DOMAIN=your-domain.mailgun.org
+        MAILGUN_SECRET=your_api_key
+        MAILGUN_ENDPOINT=api.mailgun.net
+        ```
+      </Accordion>
+
+      <Accordion title="Postmark">
+        ```bash
+        MAIL_MAILER=postmark
+        POSTMARK_TOKEN=your_postmark_token
+        ```
+      </Accordion>
+    </AccordionGroup>
+  </Tab>
+
+  <Tab title="Log (Development)">
+    For local development, log emails instead of sending:
+
+    ```bash .env
+    MAIL_MAILER=log
+    ```
+
+    Emails are written to `storage/logs/laravel.log`.
+
+    <Info>
+      You can view logged emails easily using Laravel Pail:
+      ```bash
+      php artisan pail
+      ```
+    </Info>
+  </Tab>
+</Tabs>
+
+### Test Email Configuration
+
+Verify your mail setup:
+
+```bash
+php artisan tinker
+```
+
+```php
+Mail::raw('Test email from ShelfWise', function ($message) {
+    $message->to('your-email@example.com')
+            ->subject('Test Email');
+});
+```
+
+## File Storage Configuration
+
+ShelfWise stores:
+- Product images
+- Tenant logos
+- User avatars
+- Generated PDFs and reports
+- Imported files
+
+```bash .env
+FILESYSTEM_DISK=local
+```
+
+### Storage Options
+
+<Tabs>
+  <Tab title="Local (Default)">
+    Files are stored in `storage/app`.
+
+    ```bash .env
+    FILESYSTEM_DISK=local
+    ```
+
+    Create symlink for public access:
+    ```bash
+    php artisan storage:link
+    ```
+
+    This creates `public/storage -> storage/app/public`.
+  </Tab>
+
+  <Tab title="Amazon S3">
+    Store files in AWS S3:
+
+    ```bash .env
+    FILESYSTEM_DISK=s3
+
+    AWS_ACCESS_KEY_ID=your_access_key
+    AWS_SECRET_ACCESS_KEY=your_secret_key
+    AWS_DEFAULT_REGION=us-east-1
+    AWS_BUCKET=your-bucket-name
+    AWS_USE_PATH_STYLE_ENDPOINT=false
+    ```
+
+    Install AWS SDK:
+    ```bash
+    composer require league/flysystem-aws-s3-v3 "^3.0"
+    ```
+  </Tab>
+</Tabs>
+
+## Logging Configuration
+
+```bash .env
+LOG_CHANNEL=stack
+LOG_STACK=single
+LOG_DEPRECATIONS_CHANNEL=null
+LOG_LEVEL=debug
+```
+
+**Log Levels:**
+- `debug` - Detailed debug information (development)
+- `info` - Interesting events
+- `notice` - Normal but significant events
+- `warning` - Exceptional occurrences that are not errors
+- `error` - Runtime errors (production default)
+- `critical` - Critical conditions
+- `alert` - Action must be taken immediately
+- `emergency` - System is unusable
+
+<Info>
+  For production, set `LOG_LEVEL=error` to reduce log file size.
+</Info>
+
+### View Logs
+
+Real-time log viewing:
+
+```bash
+php artisan pail
+```
+
+Or tail the log file:
+
+```bash
+tail -f storage/logs/laravel.log
+```
+
+## Broadcasting Configuration
+
+ShelfWise supports real-time features via Laravel's broadcasting (future feature).
+
+```bash .env
+BROADCAST_CONNECTION=log
+```
+
+For production real-time features:
+- Use Pusher or Ably
+- Or self-host with Laravel Reverb
+- Or use Redis with Laravel Echo Server
+
+## Security Settings
+
+### Password Hashing
+
+```bash .env
+BCRYPT_ROUNDS=12
+```
+
+<Warning>
+  Higher rounds = more secure but slower. 12 is a good balance. Don't set below 10.
+</Warning>
+
+### Maintenance Mode
+
+Put application in maintenance mode during updates:
+
+```bash
+# Enable maintenance mode
+php artisan down --secret=your-secret-bypass-token
+
+# Perform updates...
+
+# Disable maintenance mode
+php artisan up
+```
+
+Access site during maintenance:
+```
+https://yourdomain.com/your-secret-bypass-token
+```
+
+## Performance Optimization
+
+### Production Optimizations
+
+Run these commands after deployment:
+
+```bash
+# Cache configuration
+php artisan config:cache
+
+# Cache routes
+php artisan route:cache
+
+# Cache views
+php artisan view:cache
+
+# Optimize autoloader
+composer install --optimize-autoloader --no-dev
+```
+
+### OPcache Configuration
+
+Enable OPcache in production. Edit `php.ini`:
+
+```ini
+opcache.enable=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=10000
+opcache.revalidate_freq=60
+opcache.fast_shutdown=1
+```
+
+Restart PHP-FPM:
+```bash
+sudo systemctl restart php8.2-fpm
+```
+
+## Environment-Specific Configs
+
+<CodeGroup>
+```bash Development
+APP_ENV=local
+APP_DEBUG=true
+DB_CONNECTION=sqlite
+QUEUE_CONNECTION=database
+CACHE_STORE=database
+MAIL_MAILER=log
+LOG_LEVEL=debug
+```
+
+```bash Staging
+APP_ENV=staging
+APP_DEBUG=false
+DB_CONNECTION=mysql
+QUEUE_CONNECTION=redis
+CACHE_STORE=redis
+MAIL_MAILER=smtp
+LOG_LEVEL=info
+```
+
+```bash Production
+APP_ENV=production
+APP_DEBUG=false
+DB_CONNECTION=mysql
+QUEUE_CONNECTION=redis
+CACHE_STORE=redis
+SESSION_DRIVER=redis
+MAIL_MAILER=smtp
+LOG_LEVEL=error
+```
+</CodeGroup>
+
+## Configuration Verification
+
+Check your configuration:
+
+```bash
+# View all config values
+php artisan config:show
+
+# View specific config
+php artisan config:show database
+php artisan config:show mail
+
+# Check environment
+php artisan about
+```
+
+<Info>
+  The `php artisan about` command shows a summary of your application environment, including PHP version, database connection, cache driver, and more.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Tenancy Setup" icon="users" href="/setup/multi-tenancy">
+    Learn how ShelfWise isolates tenant data and implements role-based access control
+  </Card>
+  
+  <Card title="API Documentation" icon="code" href="/api/services">
+    Integrate with the service layer API
+  </Card>
+</CardGroup>

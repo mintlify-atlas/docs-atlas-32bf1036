@@ -1,0 +1,486 @@
+---
+title: Purchase Orders
+description: Complete workflow for creating, processing, and fulfilling B2B purchase orders in ShelfWise
+---
+
+## Overview
+
+Purchase orders enable buyers to order products from suppliers with full inventory tracking, payment management, and status workflows.
+
+## Purchase Order Lifecycle
+
+Purchase orders progress through a multi-stage workflow:
+
+```
+DRAFT → SUBMITTED → APPROVED → PROCESSING → SHIPPED → RECEIVED → COMPLETED
+              ↓
+         CANCELLED
+```
+
+### Status Definitions
+
+| Status | Description | Editable | Next Actions |
+|--------|-------------|----------|-------------|
+| `DRAFT` | Being created by buyer | Yes | Submit, Cancel |
+| `SUBMITTED` | Sent to supplier, stock reserved | Yes | Approve, Cancel |
+| `APPROVED` | Supplier approved order | No | Start Processing, Ship, Cancel |
+| `PROCESSING` | Supplier is preparing order | No | Ship, Cancel |
+| `SHIPPED` | Order shipped, stock deducted | No | Receive (buyer action) |
+| `PARTIALLY_RECEIVED` | Some items received | No | Receive remaining |
+| `RECEIVED` | All items received | No | Complete |
+| `COMPLETED` | Order finalized | No | - |
+| `CANCELLED` | Order cancelled | No | - |
+
+<Note>
+Status transition rules are enforced by methods on the `PurchaseOrderStatus` enum. See: `app/Enums/PurchaseOrderStatus.php:17`
+</Note>
+
+## Creating a Purchase Order
+
+<Steps>
+  <Step title="Verify supplier connection">
+    Buyers must have an active connection with the supplier:
+    
+    ```php
+    use App\Services\PurchaseOrderService;
+    
+    if (!$connectionService->canOrder($buyerTenant, $supplierTenant)) {
+        throw new \Exception('No active connection with supplier');
+    }
+    ```
+    
+    See: `app/Services/PurchaseOrderService.php:29`
+  </Step>
+  
+  <Step title="Create the purchase order">
+    ```php
+    $po = $purchaseOrderService->createPurchaseOrder(
+        $buyerTenant,
+        $shop,
+        $supplierTenant,
+        [
+            'notes' => 'Monthly inventory restock',
+            'expected_delivery_date' => '2026-03-15',
+            'items' => [
+                [
+                    'catalog_item_id' => 123,
+                    'product_variant_id' => 456,
+                    'quantity' => 50,
+                    'notes' => 'Rush delivery if possible'
+                ]
+            ]
+        ],
+        $user
+    );
+    ```
+    
+    The PO is created in `DRAFT` status with an auto-generated PO number (e.g., `PO-20260304-A3F2B1`).
+    
+    See: `app/Services/PurchaseOrderService.php:26`
+  </Step>
+  
+  <Step title="Automatic calculations">
+    The service automatically calculates:
+    - Item pricing based on quantity and pricing tiers
+    - Subtotal, tax, shipping, discounts
+    - Payment due date based on supplier terms
+    
+    ```php
+    $po->calculateTotals();
+    $po->payment_due_date = $this->calculatePaymentDueDate($paymentTerms);
+    ```
+    
+    See: `app/Models/PurchaseOrder.php:117`
+  </Step>
+</Steps>
+
+## Adding Items to Purchase Orders
+
+```php
+$item = $purchaseOrderService->addItem($po, [
+    'catalog_item_id' => 123,
+    'product_variant_id' => 456,
+    'quantity' => 50
+]);
+```
+
+<Accordion title="Item validation checks">
+The system performs several validations:
+
+1. **Minimum order quantity**
+```php
+if ($quantity < $catalogItem->min_order_quantity) {
+    throw new \Exception(
+        "Quantity {$quantity} is below the minimum order quantity"
+    );
+}
+```
+
+2. **Credit limit enforcement**
+```php
+$outstandingAmount = $this->calculateOutstandingAmount(
+    $buyerTenantId,
+    $supplierTenantId
+);
+
+if ($newTotalOutstanding > $connection->credit_limit) {
+    throw new \Exception('Adding this item would exceed your credit limit');
+}
+```
+
+3. **Product variant availability**
+```php
+if (!$productVariantId) {
+    throw new \Exception("Product has no variants available");
+}
+```
+
+See: `app/Services/PurchaseOrderService.php:70`
+</Accordion>
+
+## Submitting the Purchase Order
+
+Buyers submit the order to the supplier:
+
+```php
+$purchaseOrderService->submitPurchaseOrder($po, $user);
+```
+
+<Warning>
+Submitting a PO triggers **stock reservation** at the supplier's inventory:
+
+```php
+foreach ($po->items as $item) {
+    $location->increment('reserved_quantity', $item->quantity);
+    
+    $this->stockMovementService->recordMovement([
+        'type' => StockMovementType::PURCHASE_ORDER_RESERVED,
+        'reason' => "Stock reserved for PO #{$po->po_number}"
+    ]);
+}
+```
+
+If any item has insufficient stock, the entire submission fails.
+
+See: `app/Services/PurchaseOrderService.php:584`
+</Warning>
+
+## Supplier Workflow
+
+### Approving Orders
+
+Suppliers review and approve submitted orders:
+
+```php
+$purchaseOrderService->approvePurchaseOrder($po, $supplierUser);
+```
+
+Status changes: `SUBMITTED` → `APPROVED`
+
+See: `app/Services/PurchaseOrderService.php:184`
+
+### Processing Orders
+
+```php
+$purchaseOrderService->startProcessingPurchaseOrder($po, $supplierUser);
+```
+
+Status changes: `APPROVED` → `PROCESSING`
+
+See: `app/Services/PurchaseOrderService.php:207`
+
+### Shipping Orders
+
+When the supplier ships the order, stock is deducted:
+
+```php
+$purchaseOrderService->shipPurchaseOrder($po, $supplierUser);
+```
+
+<Steps>
+  <Step title="Validate stock availability">
+    The system validates all items have sufficient stock before shipping:
+    
+    ```php
+    $validatedLocations = $this->validateStockForShipping($po);
+    ```
+    
+    See: `app/Services/PurchaseOrderService.php:670`
+  </Step>
+  
+  <Step title="Decrease supplier inventory">
+    Stock is deducted and reservations are released:
+    
+    ```php
+    foreach ($po->items as $item) {
+        $location->decrement('quantity', $item->quantity);
+        $location->decrement('reserved_quantity', $item->quantity);
+        
+        $this->stockMovementService->recordMovement([
+            'type' => StockMovementType::PURCHASE_ORDER_SHIPPED,
+            'quantity' => -$item->quantity
+        ]);
+    }
+    ```
+    
+    See: `app/Services/PurchaseOrderService.php:421`
+  </Step>
+  
+  <Step title="Update status">
+    Status changes: `APPROVED` or `PROCESSING` → `SHIPPED`
+  </Step>
+</Steps>
+
+## Buyer Receiving Workflow
+
+### Full Receipt
+
+Receive all items at once:
+
+```php
+$purchaseOrderService->receivePurchaseOrder(
+    $po,
+    $buyerUser,
+    [
+        'items' => [
+            $itemId1 => ['received_quantity' => 50],
+            $itemId2 => ['received_quantity' => 100]
+        ],
+        'actual_delivery_date' => '2026-03-10'
+    ]
+);
+```
+
+### Partial Receipt
+
+ShelfWise supports receiving items incrementally:
+
+```php
+// First receipt
+$purchaseOrderService->receivePurchaseOrder($po, $user, [
+    'items' => [
+        $itemId => ['received_quantity' => 30] // 30 of 50 ordered
+    ]
+]);
+
+// Status: SHIPPED → PARTIALLY_RECEIVED
+
+// Second receipt
+$purchaseOrderService->receivePurchaseOrder($po, $user, [
+    'items' => [
+        $itemId => ['received_quantity' => 20] // remaining 20
+    ]
+]);
+
+// Status: PARTIALLY_RECEIVED → RECEIVED
+```
+
+<Note>
+Each item tracks `received_quantity` separately. The PO status automatically updates based on completion:
+
+```php
+$allItemsFullyReceived = $po->items()->get()
+    ->every(fn($item) => $item->isFullyReceived());
+
+$status = $allItemsFullyReceived 
+    ? PurchaseOrderStatus::RECEIVED 
+    : PurchaseOrderStatus::PARTIALLY_RECEIVED;
+```
+
+See: `app/Services/PurchaseOrderService.php:297`
+</Note>
+
+### Stock Movement on Receipt
+
+When items are received, buyer inventory increases:
+
+```php
+protected function increaseBuyerStock(
+    PurchaseOrderItem $item,
+    int $receivedQuantity,
+    User $user
+): void {
+    $location->increment('quantity', $receivedQuantity);
+    
+    $this->stockMovementService->recordMovement([
+        'type' => StockMovementType::PURCHASE_ORDER_RECEIVED,
+        'quantity' => $receivedQuantity,
+        'reason' => "Received from {$po->supplierTenant->name} - PO #{$po->po_number}"
+    ]);
+}
+```
+
+See: `app/Services/PurchaseOrderService.php:448`
+
+## Cancelling Purchase Orders
+
+```php
+$purchaseOrderService->cancelPurchaseOrder($po, 'Supplier out of stock');
+```
+
+<Warning>
+Cancelling a PO releases reserved stock at the supplier:
+
+```php
+protected function releaseStockReservation(PurchaseOrder $po): void
+{
+    foreach ($po->items as $item) {
+        $location->decrement('reserved_quantity', $item->quantity);
+        
+        $this->stockMovementService->recordMovement([
+            'type' => StockMovementType::PURCHASE_ORDER_RESERVATION_RELEASED,
+            'reason' => "Reservation released for cancelled PO"
+        ]);
+    }
+}
+```
+
+Payment status is also set to `CANCELLED`.
+
+See: `app/Services/PurchaseOrderService.php:631`
+</Warning>
+
+## Payment Management
+
+### Payment Statuses
+
+| Status | Description |
+|--------|-------------|
+| `PENDING` | No payment received |
+| `PARTIAL` | Some payment received |
+| `OVERDUE` | Past payment due date |
+| `PAID` | Fully paid |
+| `CANCELLED` | Payment cancelled |
+
+### Recording Payments
+
+```php
+$payment = $purchaseOrderService->recordPayment(
+    $po,
+    [
+        'amount' => 5000.00,
+        'payment_date' => now(),
+        'payment_method' => 'bank_transfer',
+        'reference_number' => 'TXN-123456',
+        'notes' => 'Payment for PO-20260304-A3F2B1'
+    ],
+    $user
+);
+```
+
+See: `app/Services/PurchaseOrderService.php:367`
+
+### Automatic Status Updates
+
+Payment status updates automatically based on amounts:
+
+```php
+public function updatePaymentStatus(): void
+{
+    $totalAmount = (float) $this->total_amount;
+    $paidAmount = (float) $this->paid_amount;
+    $isFullyPaid = $paidAmount >= $totalAmount;
+    $isOverdue = $this->payment_due_date && now()->isAfter($this->payment_due_date);
+    
+    if ($isFullyPaid) {
+        $this->payment_status = PurchaseOrderPaymentStatus::PAID;
+    } elseif ($isOverdue) {
+        $this->payment_status = PurchaseOrderPaymentStatus::OVERDUE;
+    } elseif ($paidAmount > 0) {
+        $this->payment_status = PurchaseOrderPaymentStatus::PARTIAL;
+    }
+}
+```
+
+See: `app/Models/PurchaseOrder.php:130`
+
+## Payment Terms
+
+Suppliers configure default payment terms:
+
+```php
+$supplierProfile->update([
+    'payment_terms' => 'Net 30'
+]);
+```
+
+The system parses various formats:
+
+- `"Net 30"` → 30 days
+- `"Net 30 Days"` → 30 days
+- `"Due in 15 days"` → 15 days
+- `"COD"` → Immediate (0 days)
+- `"Due on Receipt"` → Immediate
+
+```php
+protected function calculatePaymentDueDate(?string $paymentTerms): ?\DateTime
+{
+    if (in_array($normalizedTerms, ['cod', 'cash on delivery', 'due on receipt'])) {
+        return now()->toDateTime();
+    }
+    
+    if (preg_match('/(\d+)\s*(?:days?|d)?/i', $paymentTerms, $matches)) {
+        return now()->addDays((int) $matches[1])->toDateTime();
+    }
+    
+    return now()->addDays(30)->toDateTime(); // Default
+}
+```
+
+See: `app/Services/PurchaseOrderService.php:498`
+
+## Reporting and Analytics
+
+### Receipt Completion Tracking
+
+```php
+// Get completion percentage
+$percentage = $po->getReceiptCompletionPercentage();
+
+// Check if fully received
+if ($po->isFullyReceived()) {
+    // All items received
+}
+
+// Check for partial receipts
+if ($po->hasPartialReceipts()) {
+    // Some items partially received
+}
+```
+
+See: `app/Models/PurchaseOrder.php:181`
+
+### Query Scopes
+
+```php
+// Buyer view
+$orders = PurchaseOrder::forBuyer($tenantId)
+    ->forShop($shopId)
+    ->byStatus(PurchaseOrderStatus::SHIPPED)
+    ->get();
+
+// Supplier view
+$orders = PurchaseOrder::forSupplier($tenantId)
+    ->byStatus(PurchaseOrderStatus::SUBMITTED)
+    ->get();
+```
+
+See: `app/Models/PurchaseOrder.php:158`
+
+## Authorization
+
+Purchase orders use policy-based authorization with separate permissions for buyers and suppliers:
+
+```php
+// Buyer actions
+Gate::authorize('purchaseOrder.viewAny', PurchaseOrder::class);
+Gate::authorize('purchaseOrder.submit', $purchaseOrder);
+Gate::authorize('purchaseOrder.cancel', $purchaseOrder);
+
+// Supplier actions
+Gate::authorize('purchaseOrder.viewAsSupplier', $tenant);
+Gate::authorize('purchaseOrder.approve', $purchaseOrder);
+Gate::authorize('purchaseOrder.ship', $purchaseOrder);
+```
+
+See: `app/Http/Controllers/PurchaseOrderController.php:33`

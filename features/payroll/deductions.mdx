@@ -1,0 +1,646 @@
+---
+title: Deductions
+description: Flexible deduction system supporting statutory, voluntary, loan, and custom deduction types
+---
+
+ShelfWise provides a comprehensive deduction system that supports Nigerian statutory deductions (pension, NHF, NHIS, PAYE) as well as custom voluntary deductions and loan repayments.
+
+## Deduction Architecture
+
+The system uses two models to manage deductions:
+
+<Steps>
+  <Step title="DeductionTypeModel">
+    Defines the **template** for a deduction type (e.g., "Cooperative Savings"). Contains calculation rules, rates, and categories.
+  </Step>
+  
+  <Step title="EmployeeDeduction">
+    Links a specific **employee** to a **deduction type** with custom amounts, rates, and date ranges.
+  </Step>
+</Steps>
+
+```mermaid
+graph LR
+    A[DeductionTypeModel] --> B[EmployeeDeduction]
+    B --> C[User/Employee]
+    C --> D[Payslip]
+```
+
+## Deduction Type Model
+
+Deduction types define reusable deduction templates:
+
+```php
+app/Models/DeductionTypeModel.php
+
+class DeductionTypeModel extends Model
+{
+    protected $table = 'deduction_types';
+
+    protected $fillable = [
+        'tenant_id',
+        'code',                      // e.g., PENSION, NHF, COOP_SAVINGS
+        'name',
+        'description',
+        'category',                  // DeductionCategory enum
+        'calculation_type',          // DeductionCalculationType enum
+        'calculation_base',          // DeductionCalculationBase enum
+        'default_amount',
+        'default_rate',
+        'max_amount',
+        'annual_cap',
+        'is_pre_tax',                // Deducted before tax calculation
+        'is_mandatory',
+        'is_system',                 // System-defined (cannot be deleted)
+        'is_active',
+        'priority',                  // Deduction order
+        'metadata',
+    ];
+}
+```
+
+## Deduction Categories
+
+Deductions are organized into five categories:
+
+```php
+app/Enums/DeductionCategory.php
+
+enum DeductionCategory: string
+{
+    case STATUTORY = 'statutory';
+    case VOLUNTARY = 'voluntary';
+    case LOAN = 'loan';
+    case ADVANCE = 'advance';
+    case OTHER = 'other';
+}
+```
+
+### Category Descriptions
+
+<Accordion title="Statutory Deductions">
+Government-mandated deductions including:
+- **Pension** (Employee: 8%, Employer: 10%)
+- **NHF** (National Housing Fund: 2.5% of basic salary)
+- **NHIS** (National Health Insurance Scheme: fixed amount)
+- **PAYE** (Progressive income tax)
+
+Statutory deductions are **always mandatory** and configured per employee in their payroll settings.
+</Accordion>
+
+<Accordion title="Voluntary Deductions">
+Employee-elected deductions such as:
+- Cooperative society savings
+- Life insurance premiums
+- Health insurance (supplementary)
+- Retirement savings (beyond statutory)
+- Union dues
+</Accordion>
+
+<Accordion title="Loan Repayments">
+Repayment of loans from:
+- Company loans
+- Third-party loans (where employer facilitates repayment)
+- Equipment purchase financing
+</Accordion>
+
+<Accordion title="Wage Advances">
+Repayment of salary advances requested by employees. See [Wage Advances](/features/payroll/wage-advances) for details.
+</Accordion>
+
+<Accordion title="Other Deductions">
+Miscellaneous deductions including:
+- Disciplinary fines
+- Damage/loss recovery
+- Overpayment recovery
+- Court orders (garnishments)
+</Accordion>
+
+## Calculation Types
+
+Deductions can be calculated in four different ways:
+
+```php
+app/Enums/DeductionCalculationType.php
+
+enum DeductionCalculationType: string
+{
+    case FIXED = 'fixed';
+    case PERCENTAGE = 'percentage';
+    case TIERED = 'tiered';
+    case FORMULA = 'formula';
+}
+```
+
+### Fixed Amount
+
+A constant amount deducted each period:
+
+```php
+// Example: NHIS contribution
+[
+    'code' => 'NHIS',
+    'name' => 'National Health Insurance Scheme',
+    'category' => DeductionCategory::STATUTORY,
+    'calculation_type' => DeductionCalculationType::FIXED,
+    'default_amount' => 500.00,
+    'is_mandatory' => true,
+]
+```
+
+### Percentage
+
+Calculated as a percentage of a base amount (gross, basic, taxable, pensionable, or net):
+
+```php
+// Example: Pension contribution
+[
+    'code' => 'PENSION',
+    'name' => 'Pension Contribution',
+    'category' => DeductionCategory::STATUTORY,
+    'calculation_type' => DeductionCalculationType::PERCENTAGE,
+    'calculation_base' => DeductionCalculationBase::GROSS,
+    'default_rate' => 8.0,  // 8%
+    'is_mandatory' => true,
+    'is_pre_tax' => true,
+]
+```
+
+### Tiered/Progressive
+
+Progressive rates based on income bands (similar to tax brackets):
+
+```php
+// Example: Union dues based on salary bands
+[
+    'code' => 'UNION_DUES',
+    'name' => 'Union Membership Dues',
+    'category' => DeductionCategory::VOLUNTARY,
+    'calculation_type' => DeductionCalculationType::TIERED,
+    'metadata' => [
+        'tiers' => [
+            ['min' => 0, 'max' => 50000, 'amount' => 500],
+            ['min' => 50001, 'max' => 100000, 'amount' => 1000],
+            ['min' => 100001, 'max' => null, 'amount' => 2000],
+        ],
+    ],
+]
+```
+
+### Custom Formula
+
+Complex calculations using custom formulas:
+
+```php
+// Example: Performance-based deduction
+[
+    'code' => 'PERF_ADJUSTMENT',
+    'name' => 'Performance Adjustment',
+    'category' => DeductionCategory::OTHER,
+    'calculation_type' => DeductionCalculationType::FORMULA,
+    'metadata' => [
+        'formula' => '(gross * 0.05) - (performance_bonus * 0.02)',
+    ],
+]
+```
+
+## Calculation Base
+
+For percentage-based deductions, you can specify which base amount to use:
+
+```php
+enum DeductionCalculationBase: string
+{
+    case GROSS = 'gross';           // Total gross earnings
+    case BASIC = 'basic';           // Basic salary only
+    case TAXABLE = 'taxable';       // Taxable income
+    case PENSIONABLE = 'pensionable'; // Pensionable income
+    case NET = 'net';               // Net pay (after other deductions)
+}
+```
+
+## Employee Deduction Model
+
+Employee deductions link individual employees to deduction types:
+
+```php
+app/Models/EmployeeDeduction.php
+
+class EmployeeDeduction extends Model
+{
+    protected $fillable = [
+        'tenant_id',
+        'user_id',
+        'deduction_type_id',
+        'amount',                    // Override default_amount
+        'rate',                      // Override default_rate
+        'total_target',              // For loans/advances (total to deduct)
+        'total_deducted',            // Amount deducted so far
+        'effective_from',            // Start date
+        'effective_to',              // End date (optional)
+        'is_active',
+        'custom_rules',              // JSON overrides
+    ];
+}
+```
+
+## Creating Deduction Types
+
+### System Deductions
+
+Statutory deductions are typically seeded during installation:
+
+```php
+use App\Models\DeductionTypeModel;
+use App\Enums\{DeductionCategory, DeductionCalculationType, DeductionCalculationBase};
+
+class DeductionTypeSeeder extends Seeder
+{
+    public function run(): void
+    {
+        $types = [
+            [
+                'code' => 'PENSION',
+                'name' => 'Pension Contribution',
+                'category' => DeductionCategory::STATUTORY,
+                'calculation_type' => DeductionCalculationType::PERCENTAGE,
+                'calculation_base' => DeductionCalculationBase::GROSS,
+                'default_rate' => 8.0,
+                'is_pre_tax' => true,
+                'is_mandatory' => true,
+                'is_system' => true,
+                'priority' => 1,
+            ],
+            [
+                'code' => 'NHF',
+                'name' => 'National Housing Fund',
+                'category' => DeductionCategory::STATUTORY,
+                'calculation_type' => DeductionCalculationType::PERCENTAGE,
+                'calculation_base' => DeductionCalculationBase::BASIC,
+                'default_rate' => 2.5,
+                'is_pre_tax' => true,
+                'is_mandatory' => true,
+                'is_system' => true,
+                'priority' => 2,
+            ],
+            [
+                'code' => 'NHIS',
+                'name' => 'National Health Insurance',
+                'category' => DeductionCategory::STATUTORY,
+                'calculation_type' => DeductionCalculationType::FIXED,
+                'default_amount' => 500.00,
+                'is_pre_tax' => false,
+                'is_mandatory' => true,
+                'is_system' => true,
+                'priority' => 3,
+            ],
+        ];
+
+        foreach ($types as $type) {
+            DeductionTypeModel::create($type);
+        }
+    }
+}
+```
+
+### Custom Deduction Types
+
+```php
+public function store(CreateDeductionTypeRequest $request)
+{
+    Gate::authorize('create', DeductionTypeModel::class);
+
+    $deductionType = DeductionTypeModel::create([
+        'tenant_id' => auth()->user()->tenant_id,
+        'code' => $request->code,
+        'name' => $request->name,
+        'description' => $request->description,
+        'category' => $request->category,
+        'calculation_type' => $request->calculation_type,
+        'calculation_base' => $request->calculation_base,
+        'default_amount' => $request->default_amount,
+        'default_rate' => $request->default_rate,
+        'max_amount' => $request->max_amount,
+        'is_pre_tax' => $request->is_pre_tax ?? false,
+        'is_mandatory' => $request->is_mandatory ?? false,
+        'is_system' => false,
+        'is_active' => true,
+        'priority' => $request->priority ?? 100,
+    ]);
+
+    return redirect()->route('deduction-types.index')
+        ->with('success', 'Deduction type created successfully');
+}
+```
+
+## Assigning Deductions to Employees
+
+```php
+use App\Models\EmployeeDeduction;
+
+public function assignDeduction(User $employee, CreateEmployeeDeductionRequest $request)
+{
+    Gate::authorize('manage-payroll', $employee);
+
+    $deductionType = DeductionTypeModel::find($request->deduction_type_id);
+
+    $employeeDeduction = EmployeeDeduction::create([
+        'tenant_id' => $employee->tenant_id,
+        'user_id' => $employee->id,
+        'deduction_type_id' => $deductionType->id,
+        'amount' => $request->amount ?? $deductionType->default_amount,
+        'rate' => $request->rate ?? $deductionType->default_rate,
+        'total_target' => $request->total_target,  // For loans
+        'effective_from' => $request->effective_from ?? now(),
+        'effective_to' => $request->effective_to,
+        'is_active' => true,
+    ]);
+
+    return back()->with('success', 'Deduction assigned to employee');
+}
+```
+
+## Calculating Deductions
+
+The calculation logic is in the `EmployeeDeduction` model:
+
+```php
+app/Models/EmployeeDeduction.php:84-117
+
+public function calculateAmount(array $amounts = []): float
+{
+    $type = $this->deductionType;
+
+    $baseAmount = match ($type->calculation_base) {
+        DeductionCalculationBase::GROSS => $amounts['gross'] ?? 0,
+        DeductionCalculationBase::BASIC => $amounts['basic'] ?? 0,
+        DeductionCalculationBase::TAXABLE => $amounts['taxable'] ?? 0,
+        DeductionCalculationBase::PENSIONABLE => $amounts['pensionable'] ?? 0,
+        DeductionCalculationBase::NET => $amounts['net'] ?? 0,
+        default => $amounts['gross'] ?? 0,
+    };
+
+    $calculatedAmount = match ($type->calculation_type) {
+        DeductionCalculationType::FIXED => (float) ($this->amount ?? $type->default_amount ?? 0),
+        DeductionCalculationType::PERCENTAGE => $baseAmount * (($this->rate ?? $type->default_rate ?? 0) / 100),
+        DeductionCalculationType::TIERED => $this->calculateTieredAmount($baseAmount),
+        DeductionCalculationType::FORMULA => $this->evaluateFormula($amounts),
+        default => 0,
+    };
+
+    // Apply maximum cap
+    if ($type->max_amount && $calculatedAmount > $type->max_amount) {
+        $calculatedAmount = (float) $type->max_amount;
+    }
+
+    // For loans/advances with target: don't exceed remaining balance
+    if ($this->total_target) {
+        $remaining = $this->total_target - $this->total_deducted;
+        if ($calculatedAmount > $remaining) {
+            $calculatedAmount = max(0, $remaining);
+        }
+    }
+
+    return $calculatedAmount;
+}
+```
+
+### Usage in Payroll
+
+```php
+use App\Services\DeductionsService;
+
+$deductions = $this->deductionsService->calculateEmployeeDeductions(
+    employee: $employee,
+    periodStart: $periodStart,
+    periodEnd: $periodEnd,
+    amounts: [
+        'gross' => 250000.00,
+        'basic' => 180000.00,
+        'taxable' => 230000.00,
+        'pensionable' => 250000.00,
+    ]
+);
+
+// Returns:
+[
+    'total_deductions' => 45000.00,
+    'total_pre_tax' => 25000.00,
+    'breakdown' => [
+        [
+            'type' => 'Pension Contribution',
+            'code' => 'PENSION',
+            'category' => 'statutory',
+            'amount' => 20000.00,
+            'deduction_id' => 123,
+        ],
+        [
+            'type' => 'National Housing Fund',
+            'code' => 'NHF',
+            'category' => 'statutory',
+            'amount' => 4500.00,
+            'deduction_id' => 124,
+        ],
+        // ...
+    ],
+]
+```
+
+## Recording Deductions
+
+When payroll is completed, deduction amounts are recorded:
+
+```php
+app/Services/PayRunService.php:494-506
+
+protected function updateDeductionRecords(PayRunItem $item): void
+{
+    $deductions = $item->deductions_breakdown ?? [];
+
+    foreach ($deductions as $deduction) {
+        if (isset($deduction['deduction_id']) && $deduction['amount'] > 0) {
+            $employeeDeduction = EmployeeDeduction::find($deduction['deduction_id']);
+            if ($employeeDeduction) {
+                $this->deductionsService->recordDeductionPayment($employeeDeduction, $deduction['amount']);
+            }
+        }
+    }
+}
+```
+
+### Recording a Deduction Payment
+
+```php
+app/Models/EmployeeDeduction.php:129-138
+
+public function recordDeduction(float $amount): void
+{
+    $this->total_deducted += $amount;
+    $this->save();
+
+    if ($this->total_target && $this->total_deducted >= $this->total_target) {
+        $this->is_active = false;
+        $this->save();
+    }
+}
+```
+
+<Note>
+When a deduction with a `total_target` (e.g., a loan) reaches its target amount, it is automatically marked as **inactive** and will no longer be applied to future payslips.
+</Note>
+
+## Deduction Priority
+
+Deductions are applied in priority order to ensure critical deductions (statutory) are processed first:
+
+```php
+$deductions = EmployeeDeduction::forUser($employeeId)
+    ->activeOn($periodEnd)
+    ->with('deductionType')
+    ->get()
+    ->sortBy('deductionType.priority');
+```
+
+Typical priority order:
+1. Pension (statutory)
+2. NHF (statutory)
+3. NHIS (statutory)
+4. Wage advances
+5. Loan repayments
+6. Voluntary deductions
+7. Other deductions
+
+<Warning>
+Tax (PAYE) is calculated **after** pre-tax deductions (pension, NHF) are applied. Ensure `is_pre_tax` is set correctly on deduction types.
+</Warning>
+
+## Querying Deductions
+
+### Active Deductions for Employee
+
+```php
+use Carbon\Carbon;
+
+$activeDeductions = EmployeeDeduction::forUser($employeeId)
+    ->activeOn(Carbon::now())
+    ->with('deductionType')
+    ->get();
+```
+
+### Incomplete Loans/Advances
+
+```php
+$incompleteDeductions = EmployeeDeduction::forUser($employeeId)
+    ->incomplete()  // Has total_target and not fully deducted
+    ->with('deductionType')
+    ->get();
+```
+
+### Deductions by Category
+
+```php
+use App\Enums\DeductionCategory;
+
+$statutoryDeductions = DeductionTypeModel::forTenant($tenantId)
+    ->byCategory(DeductionCategory::STATUTORY)
+    ->active()
+    ->get();
+```
+
+## Deduction Scopes
+
+```php
+app/Models/EmployeeDeduction.php:58-82
+
+public function scopeActiveOn($query, Carbon $date)
+{
+    return $query->where('is_active', true)
+        ->where('effective_from', '<=', $date)
+        ->where(function ($q) use ($date) {
+            $q->whereNull('effective_to')
+                ->orWhere('effective_to', '>=', $date);
+        });
+}
+
+public function scopeIncomplete($query)
+{
+    return $query->whereNotNull('total_target')
+        ->whereColumn('total_deducted', '<', 'total_target');
+}
+```
+
+## Pre-Tax vs Post-Tax Deductions
+
+Deductions are applied in two stages:
+
+<Steps>
+  <Step title="Pre-Tax Deductions">
+    Applied **before** tax calculation. These reduce taxable income.
+    - Pension (8%)
+    - NHF (2.5%)
+    - Retirement savings (if applicable)
+  </Step>
+  
+  <Step title="Calculate Tax">
+    PAYE tax is calculated on the taxable income (gross - pre-tax deductions - tax reliefs).
+  </Step>
+  
+  <Step title="Post-Tax Deductions">
+    Applied **after** tax calculation.
+    - NHIS
+    - Wage advances
+    - Loans
+    - Voluntary deductions (usually)
+  </Step>
+</Steps>
+
+```php
+// Payroll calculation flow
+$grossPay = $earnings['total_gross'];
+$preTaxDeductions = $this->calculatePreTaxDeductions($employee, $grossPay);
+$taxableIncome = $grossPay - $preTaxDeductions;
+$tax = $this->calculateTax($taxableIncome);
+$postTaxDeductions = $this->calculatePostTaxDeductions($employee, $grossPay);
+$netPay = $grossPay - $preTaxDeductions - $tax - $postTaxDeductions;
+```
+
+## Deduction Reports
+
+### Total Deductions by Category
+
+```php
+public function getDeductionSummary(int $tenantId, Carbon $startDate, Carbon $endDate): array
+{
+    $payslips = Payslip::forTenant($tenantId)
+        ->whereHas('payrollPeriod', function ($q) use ($startDate, $endDate) {
+            $q->whereBetween('payment_date', [$startDate, $endDate]);
+        })
+        ->get();
+
+    $summary = [];
+    foreach ($payslips as $payslip) {
+        foreach ($payslip->deductions_breakdown as $deduction) {
+            $category = $deduction['category'];
+            if (!isset($summary[$category])) {
+                $summary[$category] = ['total' => 0, 'count' => 0];
+            }
+            $summary[$category]['total'] += $deduction['amount'];
+            $summary[$category]['count']++;
+        }
+    }
+
+    return $summary;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tax Calculation" icon="calculator" href="/features/payroll/overview#tax-calculation">
+    Learn how PAYE tax is calculated with date-aware tax laws
+  </Card>
+  
+  <Card title="Wage Advances" icon="money-bill-transfer" href="/features/payroll/wage-advances">
+    Manage employee salary advances with automatic repayment
+  </Card>
+</CardGroup>

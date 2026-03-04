@@ -1,0 +1,398 @@
+---
+title: Products & Variants
+description: Manage products, variants, packaging types, and inventory tracking in ShelfWise
+---
+
+## Overview
+
+ShelfWise uses a flexible product model that supports both simple products and complex multi-variant products. Each product can have multiple variants (e.g., sizes, colors), and each variant can be sold in different packaging types (e.g., loose items, boxes, cartons).
+
+## Product Structure
+
+The product hierarchy in ShelfWise follows this structure:
+
+```
+Product (Blue Shirt)
+└── Variant 1 (Size: Small)
+    ├── Packaging: Loose (1 unit)
+    └── Packaging: Pack of 5 (5 units)
+└── Variant 2 (Size: Medium)
+    ├── Packaging: Loose (1 unit)
+    └── Packaging: Pack of 5 (5 units)
+```
+
+### Product Model
+
+Products are defined in `app/Models/Product.php` and include:
+
+<ParamField path="name" type="string" required>
+  Product name displayed to customers and staff
+</ParamField>
+
+<ParamField path="slug" type="string" required>
+  URL-friendly identifier, auto-generated from name
+</ParamField>
+
+<ParamField path="product_type_id" type="integer" required>
+  Reference to ProductType (e.g., retail, pharmaceutical, food)
+</ParamField>
+
+<ParamField path="category_id" type="integer">
+  Optional category for organization
+</ParamField>
+
+<ParamField path="has_variants" type="boolean" default="false">
+  Whether this product has multiple variants
+</ParamField>
+
+<ParamField path="is_active" type="boolean" default="true">
+  Controls visibility in POS and storefront. See state management below.
+</ParamField>
+
+<ParamField path="track_stock" type="boolean" default="true">
+  Whether inventory tracking is enabled for this product
+</ParamField>
+
+<ParamField path="is_taxable" type="boolean" default="true">
+  Whether tax should be applied to this product
+</ParamField>
+
+<ParamField path="is_featured" type="boolean" default="false">
+  Whether to highlight this product in storefront
+</ParamField>
+
+## Product State Management
+
+Products use **both** `is_active` flag and soft deletes for different purposes:
+
+| State | is_active | deleted_at | Behavior |
+|-------|-----------|------------|----------|
+| Active | `true` | `null` | Fully visible: POS, Storefront, Admin, Reports |
+| Inactive | `false` | `null` | Hidden from POS/Storefront, still visible in Admin/Reports |
+| Deleted | N/A | timestamp | Completely hidden, can be restored |
+
+### When to Use is_active = false
+
+- Temporarily disable sales (out of season, pending restock)
+- Hide from customer-facing channels without losing data
+- Maintain in reports and historical data
+- Quick toggle for product availability
+
+### When to Use Soft Delete
+
+- Permanently remove from all active operations
+- Discontinue product while preserving historical order data
+- Complete removal from POS, Storefront, and Admin views
+
+<Warning>
+Soft deleted products still appear in historical order data to maintain data integrity.
+</Warning>
+
+## Product Variants
+
+Variants represent specific variations of a product. Defined in `app/Models/ProductVariant.php`:
+
+<ParamField path="sku" type="string" required>
+  Stock Keeping Unit - unique identifier for inventory tracking
+</ParamField>
+
+<ParamField path="barcode" type="string">
+  Barcode for scanning at POS
+</ParamField>
+
+<ParamField path="name" type="string">
+  Variant-specific name (e.g., "Size M", "Blue")
+</ParamField>
+
+<ParamField path="attributes" type="array">
+  JSON attributes defining the variant (e.g., `{"size": "M", "color": "Blue"}`)
+</ParamField>
+
+<ParamField path="price" type="decimal" required>
+  Selling price per base unit
+</ParamField>
+
+<ParamField path="cost_price" type="decimal">
+  Cost per base unit. Automatically updated using weighted average method.
+</ParamField>
+
+<ParamField path="reorder_level" type="integer" default="0">
+  Minimum stock level before triggering reorder alert
+</ParamField>
+
+<ParamField path="base_unit_name" type="string" default="Unit">
+  Name of the smallest sellable unit (e.g., "Piece", "Tablet", "ml")
+</ParamField>
+
+<ParamField path="is_active" type="boolean" default="true">
+  Whether this variant is available for sale
+</ParamField>
+
+<ParamField path="is_available_online" type="boolean" default="false">
+  Whether this variant is visible in the online storefront
+</ParamField>
+
+### Variant State Management
+
+Variants also use dual state management:
+
+<Tabs>
+  <Tab title="Inactive Variant">
+    Set `is_active = false` when:
+    - Temporarily suspend sales of this specific variant
+    - Variant out of stock but may return (e.g., seasonal size)
+    - Testing new variant before public release
+    - Inventory still tracked and visible in admin
+  </Tab>
+  <Tab title="Deleted Variant">
+    Soft delete when:
+    - Permanently discontinue this variant
+    - Variant will never be restocked (e.g., color discontinued)
+    - Complete removal from sales channels
+    - Inventory frozen at deletion time for historical accuracy
+  </Tab>
+</Tabs>
+
+## Stock Calculations
+
+Variants provide computed attributes for stock levels:
+
+```php
+// app/Models/ProductVariant.php:143-163
+
+$variant->total_stock      // Sum of quantity across all locations
+$variant->available_stock  // Total - reserved quantities
+```
+
+<Note>
+Use eager loading with `inventoryLocations` to avoid N+1 queries:
+```php
+ProductVariant::with('inventoryLocations')->get();
+```
+</Note>
+
+## Weighted Average Cost
+
+ShelfWise automatically calculates cost price using the weighted average method when stock is purchased:
+
+```php
+// app/Models/ProductVariant.php:168-189
+
+public function updateWeightedAverageCost(int $newQuantity, float $newCostPerUnit): void
+{
+    \DB::transaction(function () use ($newQuantity, $newCostPerUnit) {
+        $variant = self::lockForUpdate()->find($this->id);
+        $currentQty = $variant->total_stock;
+        $currentCost = (float)$variant->cost_price;
+        
+        $newAvg = (($currentQty * $currentCost) + ($newQuantity * $newCostPerUnit))
+            / ($currentQty + $newQuantity);
+        
+        $variant->update(['cost_price' => round($newAvg, 2)]);
+    });
+}
+```
+
+### Example Calculation
+
+1. You have 100 units at $10 each (total value: $1,000)
+2. You purchase 50 more units at $12 each (total value: $600)
+3. New weighted average: ($1,000 + $600) / (100 + 50) = **$10.67 per unit**
+
+<Warning>
+The weighted average calculation uses pessimistic locking to prevent race conditions during concurrent purchases.
+</Warning>
+
+## Creating Products
+
+Products are created through the `ProductService` in `app/Services/ProductService.php`:
+
+```php
+// app/Services/ProductService.php:22-97
+
+use App\Services\ProductService;
+
+$product = app(ProductService::class)->create(
+    data: [
+        'name' => 'Blue T-Shirt',
+        'product_type_slug' => 'retail-clothing',
+        'shop_id' => $shop->id,
+        'category_id' => $category->id,
+        'has_variants' => true,
+        'is_active' => true,
+        'variants' => [
+            [
+                'sku' => 'TSHIRT-BLUE-S',
+                'name' => 'Small',
+                'price' => 19.99,
+                'cost_price' => 8.50,
+                'reorder_level' => 10,
+                'base_unit_name' => 'Piece',
+                'attributes' => ['size' => 'S', 'color' => 'Blue'],
+            ],
+            [
+                'sku' => 'TSHIRT-BLUE-M',
+                'name' => 'Medium',
+                'price' => 19.99,
+                'cost_price' => 8.50,
+                'reorder_level' => 15,
+                'base_unit_name' => 'Piece',
+                'attributes' => ['size' => 'M', 'color' => 'Blue'],
+            ],
+        ],
+    ],
+    tenant: $tenant,
+    shop: $shop
+);
+```
+
+### Simple Products (No Variants)
+
+For products without variants, omit the `has_variants` and `variants` fields:
+
+```php
+$product = app(ProductService::class)->create(
+    data: [
+        'name' => 'Notebook A4',
+        'product_type_slug' => 'stationery',
+        'shop_id' => $shop->id,
+        'sku' => 'NOTE-A4-001',
+        'price' => 2.99,
+        'cost_price' => 1.20,
+        'reorder_level' => 50,
+        'is_active' => true,
+    ],
+    tenant: $tenant,
+    shop: $shop
+);
+```
+
+## Updating Products
+
+Update products through the service layer:
+
+```php
+// app/Services/ProductService.php:102-144
+
+$product = app(ProductService::class)->update(
+    product: $product,
+    data: [
+        'name' => 'Updated Product Name',
+        'is_active' => false,
+        'description' => 'New description',
+    ]
+);
+```
+
+### Updating Variants
+
+Variants can be updated individually:
+
+```php
+// app/Services/ProductService.php:254-335
+
+$variant = app(ProductService::class)->updateVariant(
+    variant: $variant,
+    data: [
+        'price' => 24.99,
+        'cost_price' => 10.00,
+        'reorder_level' => 20,
+        'is_active' => true,
+    ]
+);
+```
+
+<Note>
+When you update a variant's price or cost_price, all associated packaging types are automatically updated proportionally based on their `units_per_package` ratio.
+</Note>
+
+## Multi-Tenant Isolation
+
+<Warning>
+**CRITICAL**: All product queries MUST filter by `tenant_id`
+</Warning>
+
+Always use the service layer or ensure tenant filtering:
+
+```php
+// ✅ CORRECT - Service layer handles tenant isolation
+$products = app(ProductService::class)->getAllProducts();
+
+// ✅ CORRECT - Manual query with tenant filter
+$products = Product::query()
+    ->where('tenant_id', auth()->user()->tenant_id)
+    ->get();
+
+// ❌ WRONG - Missing tenant filter
+$products = Product::all();
+```
+
+See `app/Http/Controllers/ProductController.php:35` for implementation examples.
+
+## Query Scopes
+
+Products and variants provide helpful query scopes:
+
+```php
+// Get only active products
+$products = Product::query()
+    ->where('tenant_id', $tenantId)
+    ->active()
+    ->get();
+
+// Get only active variants
+$variants = ProductVariant::query()
+    ->active()
+    ->whereHas('product', fn($q) => $q->where('tenant_id', $tenantId))
+    ->get();
+```
+
+## Product Types
+
+Products are categorized by type, which determines available features:
+
+<ResponseField name="retail-general" type="ProductType">
+  Standard retail products with simple pricing
+</ResponseField>
+
+<ResponseField name="pharmaceutical" type="ProductType">
+  Requires batch tracking and expiry dates
+</ResponseField>
+
+<ResponseField name="food-beverage" type="ProductType">
+  Requires expiry date tracking
+</ResponseField>
+
+<ResponseField name="electronics" type="ProductType">
+  May require serial number tracking
+</ResponseField>
+
+Product types are defined in the database and can be customized per tenant.
+
+## Best Practices
+
+<Tabs>
+  <Tab title="Performance">
+    - Always eager load relationships to avoid N+1 queries
+    - Use `with(['inventoryLocations', 'product', 'packagingTypes'])` when fetching variants
+    - Cache product lists with `Cache::tags(["tenant:{$tenantId}:products:list"])`
+  </Tab>
+  <Tab title="Data Integrity">
+    - Never bypass the service layer for stock changes
+    - Always use `StockMovementService` for inventory adjustments
+    - Use database transactions for multi-step operations
+  </Tab>
+  <Tab title="Security">
+    - Always filter by `tenant_id` in all queries
+    - Use Laravel Policies for authorization checks
+    - Validate shop ownership before creating products
+  </Tab>
+</Tabs>
+
+## Related Models
+
+- **InventoryLocation** - Tracks stock quantities per location
+- **ProductPackagingType** - Defines different packaging units
+- **StockMovement** - Audit trail of all inventory changes
+- **ProductCategory** - Optional product categorization
+- **ProductType** - Defines product behavior and requirements

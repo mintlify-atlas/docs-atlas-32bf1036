@@ -1,0 +1,630 @@
+---
+title: Pay Runs
+description: Modern payroll workflow with draft, calculate, review, approve, and complete stages
+---
+
+Pay runs are the core of ShelfWise's payroll system. They provide a structured workflow for calculating and processing employee salaries with built-in review and approval stages.
+
+## Pay Run Model
+
+Each pay run belongs to a **payroll period** and contains multiple **pay run items** (one per employee).
+
+```php
+app/Models/PayRun.php
+
+class PayRun extends Model
+{
+    protected $fillable = [
+        'tenant_id',
+        'payroll_period_id',
+        'pay_calendar_id',
+        'reference',              // Auto-generated: PR-20260304-0001
+        'name',
+        'status',                 // PayRunStatus enum
+        'employee_count',
+        'total_gross',
+        'total_deductions',
+        'total_net',
+        'total_employer_costs',
+        'calculated_by',
+        'calculated_at',
+        'approved_by',
+        'approved_at',
+        'completed_by',
+        'completed_at',
+        'notes',
+    ];
+}
+```
+
+### Reference Generation
+
+Pay run references are automatically generated with format `PR-YYYYMMDD-NNNN`:
+
+```php
+app/Models/PayRun.php:63-83
+
+public static function generateReference(int $tenantId): string
+{
+    $prefix = 'PR';
+    $date = now()->format('Ymd');
+
+    return DB::transaction(function () use ($prefix, $date, $tenantId) {
+        $lastPayRun = self::where('tenant_id', $tenantId)
+            ->whereDate('created_at', today())
+            ->lockForUpdate()
+            ->orderByDesc('id')
+            ->first();
+
+        if ($lastPayRun && preg_match('/PR-\d{8}-(\d{4})$/', $lastPayRun->reference, $matches)) {
+            $sequence = (int) $matches[1] + 1;
+        } else {
+            $sequence = 1;
+        }
+
+        return sprintf('%s-%s-%04d', $prefix, $date, $sequence);
+    });
+}
+```
+
+## Pay Run Status Flow
+
+Pay runs progress through eight distinct statuses:
+
+```php
+app/Enums/PayRunStatus.php
+
+enum PayRunStatus: string
+{
+    case DRAFT = 'draft';
+    case CALCULATING = 'calculating';
+    case PENDING_REVIEW = 'pending_review';
+    case PENDING_APPROVAL = 'pending_approval';
+    case APPROVED = 'approved';
+    case PROCESSING = 'processing';
+    case COMPLETED = 'completed';
+    case CANCELLED = 'cancelled';
+}
+```
+
+### Status Transition Methods
+
+```php
+app/Models/PayRun.php:150-172
+
+public function canBeCalculated(): bool
+{
+    return in_array($this->status, [PayRunStatus::DRAFT, PayRunStatus::PENDING_REVIEW]);
+}
+
+public function canBeApproved(): bool
+{
+    return $this->status === PayRunStatus::PENDING_APPROVAL;
+}
+
+public function canBeCompleted(): bool
+{
+    return $this->status === PayRunStatus::APPROVED;
+}
+
+public function canBeCancelled(): bool
+{
+    return in_array($this->status, [
+        PayRunStatus::DRAFT,
+        PayRunStatus::PENDING_REVIEW,
+        PayRunStatus::PENDING_APPROVAL,
+    ]);
+}
+```
+
+## Creating a Pay Run
+
+<Steps>
+  <Step title="Create Payroll Period">
+    Define the date range and payment date for the payroll cycle.
+  </Step>
+  
+  <Step title="Create Pay Run">
+    Initialize a pay run for the period with eligible employees.
+  </Step>
+  
+  <Step title="Add Employees">
+    System automatically adds eligible employees based on filters (shop, pay calendar, etc.).
+  </Step>
+</Steps>
+
+```php
+use App\Services\PayRunService;
+use Carbon\Carbon;
+
+public function store(CreatePayRunRequest $request)
+{
+    Gate::authorize('create', PayRun::class);
+
+    $period = $this->payRunService->createPayrollPeriod(
+        tenantId: auth()->user()->tenant_id,
+        shopId: $request->shop_id,
+        startDate: Carbon::parse($request->start_date),
+        endDate: Carbon::parse($request->end_date),
+        paymentDate: Carbon::parse($request->payment_date),
+        periodName: $request->period_name ?? Carbon::parse($request->start_date)->format('F Y')
+    );
+
+    $payRun = $this->payRunService->createPayRun(
+        tenantId: auth()->user()->tenant_id,
+        period: $period,
+        options: [
+            'name' => "Pay Run - {$period->period_name}",
+            'pay_calendar_id' => $request->pay_calendar_id,
+            'shop_ids' => $request->shop_ids,
+            'user_ids' => $request->user_ids,  // Optional: specific employees
+            'notes' => $request->notes,
+        ]
+    );
+
+    return redirect()->route('pay-runs.show', $payRun);
+}
+```
+
+### Eligible Employee Selection
+
+```php
+app/Services/PayRunService.php:440-473
+
+protected function getEligibleEmployees(int $tenantId, PayrollPeriod $period, array $options): Collection
+{
+    $periodStart = Carbon::parse($period->start_date);
+    $periodEnd = Carbon::parse($period->end_date);
+
+    $query = User::where('tenant_id', $tenantId)
+        ->whereHas('employeePayrollDetail', function ($q) use ($periodStart, $periodEnd) {
+            $q->where(function ($inner) use ($periodEnd) {
+                $inner->whereNull('start_date')
+                    ->orWhere('start_date', '<=', $periodEnd);
+            })->where(function ($inner) use ($periodStart) {
+                $inner->whereNull('end_date')
+                    ->orWhere('end_date', '>=', $periodStart);
+            });
+        });
+
+    if (isset($options['pay_calendar_id'])) {
+        $query->whereHas('employeePayrollDetail', function ($q) use ($options) {
+            $q->where('pay_calendar_id', $options['pay_calendar_id']);
+        });
+    }
+
+    if (isset($options['shop_ids']) && !empty($options['shop_ids'])) {
+        $query->whereHas('shops', function ($q) use ($options) {
+            $q->whereIn('shops.id', $options['shop_ids']);
+        });
+    }
+
+    return $query->get();
+}
+```
+
+## Calculating Pay Run
+
+Calculation computes earnings, deductions, and taxes for all employees:
+
+```php
+public function calculate(PayRun $payRun)
+{
+    Gate::authorize('calculate', $payRun);
+
+    if (!$payRun->canBeCalculated()) {
+        throw new \Exception("PayRun cannot be calculated in current status: {$payRun->status}");
+    }
+
+    $payRun = $this->payRunService->calculatePayRun($payRun);
+
+    return redirect()->route('pay-runs.show', $payRun)
+        ->with('success', 'Pay run calculated successfully');
+}
+```
+
+### Calculation Process
+
+```php
+app/Services/PayRunService.php:108-144
+
+public function calculatePayRun(PayRun $payRun): PayRun
+{
+    if (!$payRun->canBeCalculated()) {
+        throw new \Exception("PayRun cannot be calculated in current status: {$payRun->status}");
+    }
+
+    $payRun->update(['status' => PayRunStatus::CALCULATING]);
+
+    $period = $payRun->payrollPeriod;
+    $periodStart = Carbon::parse($period->start_date);
+    $periodEnd = Carbon::parse($period->end_date);
+
+    foreach ($payRun->items()->processable()->get() as $item) {
+        try {
+            $calculatedData = $this->calculateEmployeePay(
+                $item->user,
+                $periodStart,
+                $periodEnd
+            );
+
+            $item->markAsCalculated($calculatedData);
+        } catch (\Exception $e) {
+            $item->markAsError($e->getMessage());
+        }
+    }
+
+    $payRun->updateTotals();
+    $payRun->update([
+        'status' => PayRunStatus::PENDING_REVIEW,
+        'calculated_by' => auth()->id(),
+        'calculated_at' => now(),
+    ]);
+
+    Cache::tags(["tenant:{$payRun->tenant_id}:payroll"])->flush();
+
+    return $payRun->fresh(['items']);
+}
+```
+
+### Employee Pay Calculation
+
+Each employee's pay is calculated in three stages:
+
+```php
+app/Services/PayRunService.php:177-256
+
+public function calculateEmployeePay(User $employee, Carbon $periodStart, Carbon $periodEnd): array
+{
+    $payrollDetail = $employee->employeePayrollDetail;
+
+    if (!$payrollDetail) {
+        return [
+            'success' => false,
+            'error' => 'Employee has no payroll configuration',
+        ];
+    }
+
+    // 1. Calculate Earnings
+    $earnings = $this->earningsService->calculateEmployeeEarnings(
+        $employee,
+        $periodStart,
+        $periodEnd,
+        ['hours_worked' => $this->getHoursWorked($employee, $periodStart, $periodEnd)]
+    );
+
+    // 2. Calculate Deductions (pre-tax)
+    $deductions = $this->deductionsService->calculateEmployeeDeductions(
+        $employee,
+        $periodStart,
+        $periodEnd,
+        array_merge($earnings, ['basic_salary' => $baseSalary])
+    );
+
+    // 3. Calculate Tax
+    $taxResult = $this->taxService->calculateMonthlyPAYE(
+        $employee,
+        $earnings['total_taxable'],
+        $deductions['total_pre_tax'],
+        [],
+        $periodEnd  // Date determines tax law version
+    );
+
+    // 4. Compute Net Pay
+    $totalDeductions = $deductions['total_deductions'] + $taxResult['tax'];
+    $netPay = max(0, $earnings['total_gross'] - $totalDeductions);
+
+    return [
+        'basic_salary' => $baseSalary,
+        'gross_earnings' => $earnings['total_gross'],
+        'taxable_earnings' => $earnings['total_taxable'],
+        'total_deductions' => $totalDeductions,
+        'net_pay' => $netPay,
+        'employer_pension' => $employerPension,
+        'employer_nhf' => $employerNhf,
+        'total_employer_cost' => $totalEmployerCost,
+        'earnings_breakdown' => $earnings['breakdown'],
+        'deductions_breakdown' => array_merge(
+            $deductions['breakdown'],
+            [['type' => 'PAYE Tax', 'code' => 'PAYE', 'category' => 'statutory', 'amount' => $taxResult['tax']]]
+        ),
+        'tax_calculation' => $taxResult,
+    ];
+}
+```
+
+<Note>
+The calculation uses **date-aware tax calculation** - the `$periodEnd` date determines which tax law version to apply (NTA 2025 vs. legacy).
+</Note>
+
+## Recalculating Individual Items
+
+You can recalculate a single employee without recalculating the entire pay run:
+
+```php
+public function recalculateEmployee(PayRun $payRun, int $userId)
+{
+    Gate::authorize('update', $payRun);
+
+    $item = $payRun->items()->where('user_id', $userId)->firstOrFail();
+    $item = $this->payRunService->recalculateItem($item);
+
+    return back()->with('success', 'Employee recalculated successfully');
+}
+```
+
+```php
+app/Services/PayRunService.php:146-175
+
+public function recalculateItem(PayRunItem $item): PayRunItem
+{
+    $payRun = $item->payRun;
+
+    if (!$payRun->canBeCalculated()) {
+        throw new \Exception("PayRun cannot be recalculated in current status: {$payRun->status}");
+    }
+
+    $period = $payRun->payrollPeriod;
+    $periodStart = Carbon::parse($period->start_date);
+    $periodEnd = Carbon::parse($period->end_date);
+
+    try {
+        $calculatedData = $this->calculateEmployeePay(
+            $item->user,
+            $periodStart,
+            $periodEnd
+        );
+
+        $item->markAsCalculated($calculatedData);
+    } catch (\Exception $e) {
+        $item->markAsError($e->getMessage());
+    }
+
+    $payRun->updateTotals();
+
+    return $item->fresh();
+}
+```
+
+## Review & Approval
+
+### Submit for Approval
+
+```php
+public function submitForApproval(PayRun $payRun)
+{
+    Gate::authorize('submit', $payRun);
+
+    $payRun = $this->payRunService->submitForApproval($payRun);
+
+    return redirect()->route('pay-runs.show', $payRun)
+        ->with('success', 'Pay run submitted for approval');
+}
+```
+
+```php
+app/Services/PayRunService.php:258-272
+
+public function submitForApproval(PayRun $payRun): PayRun
+{
+    if ($payRun->status !== PayRunStatus::PENDING_REVIEW) {
+        throw new \Exception('PayRun must be in pending review status');
+    }
+
+    $errorCount = $payRun->items()->withErrors()->count();
+    if ($errorCount > 0) {
+        throw new \Exception("Cannot submit for approval: {$errorCount} items have errors");
+    }
+
+    $payRun->update(['status' => PayRunStatus::PENDING_APPROVAL]);
+
+    return $payRun->fresh();
+}
+```
+
+### Approve Pay Run
+
+```php
+public function approve(PayRun $payRun)
+{
+    Gate::authorize('approve', $payRun);
+
+    $payRun = $this->payRunService->approvePayRun($payRun);
+
+    return redirect()->route('pay-runs.show', $payRun)
+        ->with('success', 'Pay run approved successfully');
+}
+```
+
+```php
+app/Services/PayRunService.php:274-291
+
+public function approvePayRun(PayRun $payRun): PayRun
+{
+    if (!$payRun->canBeApproved()) {
+        throw new \Exception("PayRun cannot be approved in current status: {$payRun->status}");
+    }
+
+    $payRun->update([
+        'status' => PayRunStatus::APPROVED,
+        'approved_by' => auth()->id(),
+        'approved_at' => now(),
+    ]);
+
+    $freshPayRun = $payRun->fresh(['payrollPeriod']);
+
+    $this->notifyPayRunApproved($freshPayRun, auth()->user());
+
+    return $freshPayRun;
+}
+```
+
+### Reject Pay Run
+
+```php
+public function reject(PayRun $payRun, RejectPayRunRequest $request)
+{
+    Gate::authorize('approve', $payRun);
+
+    $payRun = $this->payRunService->rejectPayRun($payRun, $request->reason);
+
+    return redirect()->route('pay-runs.show', $payRun)
+        ->with('warning', 'Pay run rejected and returned for review');
+}
+```
+
+## Completing Pay Run
+
+Completion generates final payslips and records all transactions:
+
+```php
+public function complete(PayRun $payRun)
+{
+    Gate::authorize('complete', $payRun);
+
+    $payRun = $this->payRunService->completePayRun($payRun);
+
+    return redirect()->route('pay-runs.show', $payRun)
+        ->with('success', 'Pay run completed. Payslips generated.');
+}
+```
+
+### Completion Process
+
+```php
+app/Services/PayRunService.php:307-374
+
+public function completePayRun(PayRun $payRun): PayRun
+{
+    if (!$payRun->canBeCompleted()) {
+        throw new \Exception("PayRun cannot be completed in current status: {$payRun->status}");
+    }
+
+    return DB::transaction(function () use ($payRun) {
+        $payRun->update(['status' => PayRunStatus::PROCESSING]);
+
+        $period = $payRun->payrollPeriod;
+        $periodEnd = Carbon::parse($period->end_date);
+
+        foreach ($payRun->items()->calculated()->get() as $item) {
+            // Calculate YTD values
+            $ytdData = $this->calculateYTDValues($item->user_id, $periodEnd);
+
+            // Create payslip
+            $payslip = Payslip::create([
+                'tenant_id' => $payRun->tenant_id,
+                'user_id' => $item->user_id,
+                'payroll_period_id' => $payRun->payroll_period_id,
+                'pay_run_id' => $payRun->id,
+                'basic_salary' => $item->basic_salary,
+                'gross_pay' => $item->gross_earnings,
+                'total_deductions' => $item->total_deductions,
+                'net_pay' => $item->net_pay,
+                'ytd_gross' => $ytdData['ytd_gross'] + $item->gross_earnings,
+                'ytd_tax' => $ytdData['ytd_tax'] + ($taxCalc['tax'] ?? 0),
+                'ytd_pension' => $ytdData['ytd_pension'] + $pensionEmployee,
+                'ytd_net' => $ytdData['ytd_net'] + $item->net_pay,
+                'earnings_breakdown' => $item->earnings_breakdown,
+                'deductions_breakdown' => $item->deductions_breakdown,
+                'tax_calculation' => $item->tax_calculation,
+                'status' => 'approved',
+            ]);
+
+            // Update deduction records
+            $this->updateDeductionRecords($item);
+
+            // Record wage advance repayments
+            $this->recordWageAdvanceRepayments($item, $periodEnd);
+        }
+
+        $payRun->update([
+            'status' => PayRunStatus::COMPLETED,
+            'completed_by' => auth()->id(),
+            'completed_at' => now(),
+        ]);
+
+        Cache::tags(["tenant:{$payRun->tenant_id}:payroll"])->flush();
+
+        $freshPayRun = $payRun->fresh(['payslips', 'payrollPeriod']);
+
+        $this->notifyPayRunCompleted($freshPayRun);
+
+        return $freshPayRun;
+    });
+}
+```
+
+<Warning>
+Once a pay run is completed, payslips are **immutable**. You cannot modify them. If corrections are needed, create a new correction pay run.
+</Warning>
+
+## Managing Employees
+
+### Exclude Employee
+
+Exclude an employee from a pay run without deleting them:
+
+```php
+public function excludeEmployee(PayRun $payRun, int $userId, string $reason)
+{
+    Gate::authorize('update', $payRun);
+
+    $item = $this->payRunService->excludeEmployee($payRun, $userId, $reason);
+
+    return back()->with('success', 'Employee excluded from pay run');
+}
+```
+
+### Add Employee
+
+Add an employee to a draft pay run:
+
+```php
+public function addEmployee(PayRun $payRun, User $employee)
+{
+    Gate::authorize('update', $payRun);
+
+    $item = $this->payRunService->addEmployee($payRun, $employee);
+
+    return back()->with('success', 'Employee added to pay run');
+}
+```
+
+<Note>
+Employees can only be added or removed when the pay run is in **DRAFT** status.
+</Note>
+
+## Pay Run Summary
+
+Get aggregated statistics for a pay run:
+
+```php
+$summary = $this->payRunService->getPayRunSummary($payRun);
+
+// Returns:
+[
+    'total_employees' => 45,
+    'calculated' => 43,
+    'pending' => 0,
+    'errors' => 2,
+    'excluded' => 5,
+    'totals' => [
+        'gross' => 4500000.00,
+        'deductions' => 675000.00,
+        'net' => 3825000.00,
+        'employer_costs' => 5625000.00,
+    ],
+]
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="NIBSS Export" icon="file-export" href="/features/payroll/overview#nibss-export">
+    Generate bank files for salary disbursement
+  </Card>
+  
+  <Card title="Wage Advances" icon="money-bill-transfer" href="/features/payroll/wage-advances">
+    Learn how wage advance repayments are processed
+  </Card>
+</CardGroup>

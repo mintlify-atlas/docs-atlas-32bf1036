@@ -1,0 +1,586 @@
+---
+title: "State Management"
+description: "Learn ShelfWise's single source of truth pattern for formatters, utilities, and state management"
+---
+
+## Overview
+
+ShelfWise follows a **single source of truth** pattern to ensure consistency across the application. This means:
+
+- All formatters live in `lib/formatters.ts`
+- All status configurations live in `lib/status-configs.ts`
+- All business calculations live in `lib/calculations.ts`
+- All utility functions live in `lib/utils.ts`
+
+<Note>
+**Critical Convention**: Never create local formatting or status configuration functions in components. Always use the centralized versions from `lib/`.
+</Note>
+
+## Formatters Library
+
+All formatting functions are centralized in `resources/js/lib/formatters.ts`:
+
+### Date Formatting
+
+```typescript
+import {
+    formatDateShort,
+    formatDateLong,
+    formatDateTime,
+    formatTime,
+    formatRelativeTime,
+} from '@/lib/formatters';
+
+// Short date: "Jan 15, 2024"
+const shortDate = formatDateShort(product.created_at);
+
+// Long date: "January 15, 2024, 02:30 PM"
+const longDate = formatDateLong(order.created_at);
+
+// Date and time: "Jan 15, 2024, 02:30 PM"
+const dateTime = formatDateTime(payment.created_at);
+
+// Time only: "02:30 PM"
+const time = formatTime(timesheet.clock_in);
+
+// Relative time: "2 hours ago"
+const relative = formatRelativeTime(notification.created_at);
+```
+
+**Usage in Components:**
+
+```typescript
+import { formatDateShort } from '@/lib/formatters';
+
+export default function OrderCard({ order }: { order: Order }) {
+    return (
+        <Card>
+            <p>Order Date: {formatDateShort(order.created_at)}</p>
+            <p>Total: {formatCurrency(order.total, order.shop.currency)}</p>
+        </Card>
+    );
+}
+```
+
+### Currency Formatting
+
+```typescript
+import { formatCurrency, formatCurrencyCompact } from '@/lib/formatters';
+
+// Full currency: "₦125,000.00"
+const price = formatCurrency(
+    product.price,
+    shop.currency_symbol,  // 'NGN' | 'USD' | 'EUR' | etc.
+    shop.currency_decimals // Usually 2
+);
+
+// Compact format: "₦125.5K"
+const compact = formatCurrencyCompact(order.total, 'NGN');
+```
+
+**Supported Currencies:**
+
+- NGN (₦) - Nigerian Naira
+- USD ($) - US Dollar
+- EUR (€) - Euro
+- GBP (£) - British Pound
+- KES (KSh) - Kenyan Shilling
+- GHS (₵) - Ghanaian Cedi
+- ZAR (R) - South African Rand
+
+**Example in Table:**
+
+```typescript
+import { formatCurrency } from '@/lib/formatters';
+
+<table>
+    <tbody>
+        {orders.map(order => (
+            <tr key={order.id}>
+                <td>{order.reference}</td>
+                <td>{formatCurrency(order.total, order.shop.currency)}</td>
+                <td>
+                    <Badge color={getOrderStatusColor(order.status)}>
+                        {order.status}
+                    </Badge>
+                </td>
+            </tr>
+        ))}
+    </tbody>
+</table>
+```
+
+### Number Formatting
+
+```typescript
+import { formatNumber, formatPercentage, formatQuantity } from '@/lib/formatters';
+
+// Number with decimals: "1,234.56"
+const number = formatNumber(1234.56, 2);
+
+// Percentage: "15.5%"
+const percentage = formatPercentage(15.5);
+
+// Quantity (whole or decimal): "1,234" or "1,234.5"
+const quantity = formatQuantity(product.available_stock);
+```
+
+### Duration Formatting
+
+```typescript
+import { formatDuration } from '@/lib/formatters';
+
+// 30 -> "30 min"
+const shortDuration = formatDuration(30);
+
+// 90 -> "1 hr 30 min"
+const longDuration = formatDuration(90);
+
+// 120 -> "2 hr"
+const hoursDuration = formatDuration(120);
+```
+
+## Status Configuration Library
+
+All status colors and labels are defined in `resources/js/lib/status-configs.ts`:
+
+### Order Status
+
+```typescript
+import Badge from '@/components/ui/badge/Badge';
+import { getOrderStatusColor, getOrderStatusLabel } from '@/lib/status-configs';
+
+<Badge color={getOrderStatusColor(order.status)}>
+    {getOrderStatusLabel(order.status)}
+</Badge>
+```
+
+**Available Statuses:**
+
+- `pending` - Pending (warning)
+- `confirmed` - Confirmed (info)
+- `processing` - Processing (brand)
+- `packed` - Packed (blue)
+- `shipped` - Shipped (purple)
+- `delivered` - Delivered (success)
+- `completed` - Completed (success)
+- `cancelled` - Cancelled (error)
+- `refunded` - Refunded (gray)
+
+### Payment Status
+
+```typescript
+import { getPaymentStatusColor, getPaymentStatusLabel } from '@/lib/status-configs';
+
+<Badge color={getPaymentStatusColor(order.payment_status)}>
+    {getPaymentStatusLabel(order.payment_status)}
+</Badge>
+```
+
+**Available Statuses:**
+
+- `unpaid` - Unpaid (error)
+- `pending` - Pending (warning)
+- `partial` - Partial (warning)
+- `paid` - Paid (success)
+- `refunded` - Refunded (gray)
+- `failed` - Failed (error)
+- `overdue` - Overdue (error)
+
+### Stock Movement Type
+
+```typescript
+import { 
+    getStockMovementTypeColor, 
+    getStockMovementTypeLabel 
+} from '@/lib/status-configs';
+
+<Badge color={getStockMovementTypeColor(movement.type)}>
+    {getStockMovementTypeLabel(movement.type)}
+</Badge>
+```
+
+**Available Types:**
+
+- `purchase` - Purchase (success)
+- `sale` - Sale (info)
+- `adjustment_in` - Adjustment In (success)
+- `adjustment_out` - Adjustment Out (warning)
+- `transfer_in` - Transfer In (blue)
+- `transfer_out` - Transfer Out (purple)
+- `return` - Return (info)
+- `damage` - Damage (error)
+- `loss` - Loss (error)
+- `stock_take` - Stock Take (brand)
+- `initial` - Initial Stock (gray)
+
+### All Status Configs
+
+<Tabs>
+  <Tab title="Order & Payment">
+    ```typescript
+    import {
+        getOrderStatusColor,
+        getPaymentStatusColor,
+        getReturnStatusColor,
+    } from '@/lib/status-configs';
+
+    <Badge color={getOrderStatusColor(order.status)}>
+        {order.status}
+    </Badge>
+    ```
+  </Tab>
+  
+  <Tab title="Payroll">
+    ```typescript
+    import {
+        getPayrollStatusColor,
+        getPayRunStatusColor,
+        getWageAdvanceStatusColor,
+        getTimesheetStatusColor,
+    } from '@/lib/status-configs';
+
+    <Badge color={getPayrollStatusColor(payroll.status)}>
+        {payroll.status}
+    </Badge>
+    ```
+  </Tab>
+  
+  <Tab title="Inventory">
+    ```typescript
+    import {
+        getStockMovementTypeColor,
+        getPurchaseOrderStatusColor,
+    } from '@/lib/status-configs';
+
+    <Badge color={getStockMovementTypeColor(movement.type)}>
+        {movement.type}
+    </Badge>
+    ```
+  </Tab>
+  
+  <Tab title="Staff & Roles">
+    ```typescript
+    import {
+        getStaffRoleColor,
+        getEmploymentStatusColor,
+    } from '@/lib/status-configs';
+
+    <Badge color={getStaffRoleColor(user.role)}>
+        {user.role}
+    </Badge>
+    ```
+  </Tab>
+</Tabs>
+
+### Custom Status Logic
+
+For computed statuses, use the helper functions:
+
+```typescript
+import { getStockSeverity, getCreditUsageStatus } from '@/lib/status-configs';
+
+// Stock severity based on percentage
+const stockPercentage = (availableStock / reorderPoint) * 100;
+const { label, color } = getStockSeverity(stockPercentage);
+
+<Badge color={color}>{label}</Badge>
+
+// Credit usage status
+const usagePercent = (customer.credit_used / customer.credit_limit) * 100;
+const { label, color } = getCreditUsageStatus(usagePercent);
+
+<Badge color={color}>{label}</Badge>
+```
+
+## Utility Functions
+
+Common utilities are centralized in `resources/js/lib/utils.ts`:
+
+### Class Name Utility
+
+```typescript
+import { cn } from '@/lib/utils';
+
+// Merge Tailwind classes conditionally
+<div className={cn(
+    'rounded-lg border p-4',
+    isActive && 'bg-blue-50 border-blue-500',
+    isDisabled && 'opacity-50 cursor-not-allowed'
+)}>
+    Content
+</div>
+```
+
+### Category Flattening
+
+```typescript
+import { flattenCategories } from '@/lib/utils';
+import Select from '@/components/form/Select';
+
+const categoryOptions = flattenCategories(categories);
+
+<Select
+    options={categoryOptions}
+    value={data.category_id}
+    onChange={(value) => setData('category_id', value)}
+/>
+```
+
+### Schema Transformation
+
+```typescript
+import { transformConfigBySchema } from '@/lib/utils';
+import { Form } from '@inertiajs/react';
+
+<Form
+    action={ShopController.store.url()}
+    method="post"
+    transform={(data) => 
+        transformConfigBySchema(data, selectedType?.config_schema?.properties)
+    }
+>
+    {/* Form fields */}
+</Form>
+```
+
+## Business Calculations
+
+Business logic calculations are centralized in `resources/js/lib/calculations.ts`:
+
+```typescript
+// Example calculation utilities
+export const calculateOrderTotal = (items: OrderItem[]): number => {
+    return items.reduce((total, item) => {
+        return total + (item.price * item.quantity);
+    }, 0);
+};
+
+export const calculateTax = (subtotal: number, taxRate: number): number => {
+    return subtotal * (taxRate / 100);
+};
+
+export const calculateDiscount = (
+    total: number,
+    discountType: 'percentage' | 'fixed',
+    discountValue: number
+): number => {
+    if (discountType === 'percentage') {
+        return total * (discountValue / 100);
+    }
+    return discountValue;
+};
+```
+
+## Client-Side State
+
+### Form State with useForm
+
+For complex forms, use Inertia's `useForm` hook:
+
+```typescript
+import { useForm } from '@inertiajs/react';
+import { FormEvent } from 'react';
+
+interface OrderFormData {
+    customer_id: string;
+    items: OrderItem[];
+    payment_method: string;
+    notes: string;
+}
+
+export default function CreateOrder() {
+    const { data, setData, post, processing, errors, reset } = 
+        useForm<OrderFormData>({
+            customer_id: '',
+            items: [],
+            payment_method: 'cash',
+            notes: '',
+        });
+
+    const addItem = (item: OrderItem) => {
+        setData('items', [...data.items, item]);
+    };
+
+    const removeItem = (index: number) => {
+        const newItems = data.items.filter((_, i) => i !== index);
+        setData('items', newItems);
+    };
+
+    const handleSubmit = (e: FormEvent) => {
+        e.preventDefault();
+        post('/orders', {
+            onSuccess: () => {
+                reset();
+                toast.success('Order created');
+            },
+        });
+    };
+
+    return (
+        <form onSubmit={handleSubmit}>
+            {/* Form fields */}
+        </form>
+    );
+}
+```
+
+### Local Component State
+
+For UI-only state, use React's `useState`:
+
+```typescript
+import { useState } from 'react';
+
+export default function ProductList({ products }: Props) {
+    const [searchTerm, setSearchTerm] = useState('');
+    const [selectedCategory, setSelectedCategory] = useState('');
+    const [sortBy, setSortBy] = useState('name');
+
+    const filteredProducts = products.filter(product => {
+        const matchesSearch = product.name
+            .toLowerCase()
+            .includes(searchTerm.toLowerCase());
+        const matchesCategory = !selectedCategory || 
+            product.category_id === selectedCategory;
+        return matchesSearch && matchesCategory;
+    });
+
+    return (
+        <div>
+            <Input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search products..."
+            />
+            {/* Rest of component */}
+        </div>
+    );
+}
+```
+
+### Context Providers
+
+For global UI state, use React Context:
+
+```typescript
+// contexts/ToastContext.tsx
+import { createContext, useContext, useState } from 'react';
+
+interface ToastContextValue {
+    showToast: (message: string, type: 'success' | 'error') => void;
+}
+
+const ToastContext = createContext<ToastContextValue | undefined>(undefined);
+
+export function ToastProvider({ children }: { children: React.ReactNode }) {
+    const [toasts, setToasts] = useState<Toast[]>([]);
+
+    const showToast = (message: string, type: 'success' | 'error') => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, message, type }]);
+        setTimeout(() => {
+            setToasts(prev => prev.filter(t => t.id !== id));
+        }, 3000);
+    };
+
+    return (
+        <ToastContext.Provider value={{ showToast }}>
+            {children}
+            <ToastContainer toasts={toasts} />
+        </ToastContext.Provider>
+    );
+}
+
+export function useToast() {
+    const context = useContext(ToastContext);
+    if (!context) {
+        throw new Error('useToast must be used within ToastProvider');
+    }
+    return context;
+}
+```
+
+**Usage:**
+
+```typescript
+import { useToast } from '@/contexts/ToastContext';
+
+export default function CreateProduct() {
+    const { showToast } = useToast();
+
+    const handleSubmit = () => {
+        post('/products', data, {
+            onSuccess: () => showToast('Product created!', 'success'),
+            onError: () => showToast('Failed to create product', 'error'),
+        });
+    };
+
+    return <form onSubmit={handleSubmit}>...</form>;
+}
+```
+
+## Best Practices
+
+<Note>
+1. **Never duplicate formatters** - Always import from `@/lib/formatters`
+2. **Use status configs** - Never hardcode status colors in components
+3. **Extract reusable logic** - Move common calculations to `@/lib/calculations`
+4. **Type everything** - Create TypeScript interfaces for all data structures
+5. **Keep components thin** - Business logic belongs in lib files, not components
+6. **Use Context sparingly** - Only for truly global UI state (theme, toast, etc.)
+</Note>
+
+### Anti-Pattern Example
+
+```typescript
+// ❌ DON'T DO THIS - Creating local formatter
+export default function ProductCard({ product }: Props) {
+    const formatPrice = (amount: number) => {
+        return `₦${amount.toLocaleString()}`;
+    };
+
+    const getStatusColor = (status: string) => {
+        if (status === 'active') return 'green';
+        return 'red';
+    };
+
+    return (
+        <div>
+            <p>{formatPrice(product.price)}</p>
+            <Badge color={getStatusColor(product.status)}>
+                {product.status}
+            </Badge>
+        </div>
+    );
+}
+```
+
+### Correct Pattern
+
+```typescript
+// ✅ DO THIS - Use centralized utilities
+import { formatCurrency } from '@/lib/formatters';
+import { getStatusConfig } from '@/lib/status-configs';
+import Badge from '@/components/ui/badge/Badge';
+
+export default function ProductCard({ product }: Props) {
+    const { label, color } = getStatusConfig(
+        activeStatusConfig,
+        product.is_active ? 'active' : 'inactive'
+    );
+
+    return (
+        <div>
+            <p>{formatCurrency(product.price, product.shop.currency)}</p>
+            <Badge color={color}>{label}</Badge>
+        </div>
+    );
+}
+```
+
+## See Also
+
+- [Inertia.js + React Setup](/architecture/inertia-react) - Server state management
+- [Component Library](/architecture/components) - Reusable UI components
+- [Routing with Wayfinder](/architecture/routing) - Type-safe navigation

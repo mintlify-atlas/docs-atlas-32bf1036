@@ -1,0 +1,499 @@
+---
+title: Enums
+description: PHP enums defining typed constants and state machines in ShelfWise
+---
+
+ShelfWise uses PHP 8.1+ enums extensively to define type-safe constants, status values, and state machines. All enums include helper methods for labels, colors, and validation.
+
+## Enum Conventions
+
+- **Location**: `app/Enums/`
+- **Type**: All enums are backed by string values
+- **Methods**: Each enum provides `label()`, `description()`, and `color()` methods
+- **Database**: Never use database-level enums; always use PHP enums
+
+---
+
+## OrderStatus
+
+Defines the lifecycle states of an order with status transition validation.
+
+**Location**: `app/Enums/OrderStatus.php`
+
+### Values
+
+<ParamField path="PENDING" type="string" value="pending">
+  Order created, awaiting confirmation
+</ParamField>
+
+<ParamField path="CONFIRMED" type="string" value="confirmed">
+  Order confirmed, inventory reserved, awaiting processing
+</ParamField>
+
+<ParamField path="PROCESSING" type="string" value="processing">
+  Order is being prepared for shipment
+</ParamField>
+
+<ParamField path="PACKED" type="string" value="packed">
+  Order has been packed and ready for shipment
+</ParamField>
+
+<ParamField path="SHIPPED" type="string" value="shipped">
+  Order has been shipped to customer
+</ParamField>
+
+<ParamField path="DELIVERED" type="string" value="delivered">
+  Order has been delivered to customer (final success state)
+</ParamField>
+
+<ParamField path="CANCELLED" type="string" value="cancelled">
+  Order has been cancelled (final failure state)
+</ParamField>
+
+<ParamField path="REFUNDED" type="string" value="refunded">
+  Order has been refunded (final state)
+</ParamField>
+
+### Methods
+
+<ResponseField name="label()" type="string">
+  Human-readable label
+</ResponseField>
+
+<ResponseField name="description()" type="string">
+  Detailed description of the status
+</ResponseField>
+
+<ResponseField name="color()" type="string">
+  UI color identifier (warning, success, error, etc.)
+</ResponseField>
+
+<ResponseField name="canTransitionTo(status)" type="bool">
+  Check if transition to another status is allowed
+</ResponseField>
+
+<ResponseField name="isFinal()" type="bool">
+  Check if this is a terminal status
+</ResponseField>
+
+<ResponseField name="canEdit()" type="bool">
+  Check if order can be edited in this status
+</ResponseField>
+
+<ResponseField name="canCancel()" type="bool">
+  Check if order can be cancelled from this status
+</ResponseField>
+
+### Status Transitions
+
+```php
+use App\Enums\OrderStatus;
+
+// Valid transitions
+OrderStatus::PENDING->canTransitionTo(OrderStatus::CONFIRMED); // true
+OrderStatus::CONFIRMED->canTransitionTo(OrderStatus::PROCESSING); // true
+OrderStatus::PROCESSING->canTransitionTo(OrderStatus::PACKED); // true
+OrderStatus::PACKED->canTransitionTo(OrderStatus::SHIPPED); // true
+OrderStatus::SHIPPED->canTransitionTo(OrderStatus::DELIVERED); // true
+
+// Invalid transitions
+OrderStatus::PENDING->canTransitionTo(OrderStatus::SHIPPED); // false
+OrderStatus::DELIVERED->canTransitionTo(OrderStatus::PROCESSING); // false
+
+// Cancellation allowed before delivery
+OrderStatus::CONFIRMED->canTransitionTo(OrderStatus::CANCELLED); // true
+OrderStatus::DELIVERED->canTransitionTo(OrderStatus::CANCELLED); // false
+```
+
+### Example Usage
+
+```php
+use App\Enums\OrderStatus;
+
+$order->status = OrderStatus::PENDING;
+
+echo $order->status->label(); // "Pending"
+echo $order->status->description(); // "Order created, awaiting confirmation"
+echo $order->status->color(); // "warning"
+
+if ($order->status->canEdit()) {
+    // Allow editing
+}
+
+if ($order->status->canTransitionTo(OrderStatus::CONFIRMED)) {
+    $order->status = OrderStatus::CONFIRMED;
+    $order->save();
+}
+
+// Get active statuses (not final)
+$activeStatuses = OrderStatus::activeStatuses();
+// [PENDING, CONFIRMED, PROCESSING, PACKED, SHIPPED]
+
+// For dropdown select
+$options = OrderStatus::forSelect();
+// ['pending' => 'Pending', 'confirmed' => 'Confirmed', ...]
+```
+
+---
+
+## PaymentStatus
+
+Defines payment states for orders with transition rules.
+
+**Location**: `app/Enums/PaymentStatus.php`
+
+### Values
+
+<ParamField path="UNPAID" type="string" value="unpaid">
+  No payment received
+</ParamField>
+
+<ParamField path="PARTIAL" type="string" value="partial">
+  Partial payment received
+</ParamField>
+
+<ParamField path="PAID" type="string" value="paid">
+  Payment completed in full
+</ParamField>
+
+<ParamField path="REFUNDED" type="string" value="refunded">
+  Payment refunded to customer
+</ParamField>
+
+<ParamField path="FAILED" type="string" value="failed">
+  Payment attempt failed
+</ParamField>
+
+### Methods
+
+<ResponseField name="label()" type="string">
+  Human-readable label
+</ResponseField>
+
+<ResponseField name="description()" type="string">
+  Status description
+</ResponseField>
+
+<ResponseField name="color()" type="string">
+  UI color (error, warning, success, gray)
+</ResponseField>
+
+<ResponseField name="canTransitionTo(status)" type="bool">
+  Validate status transition
+</ResponseField>
+
+<ResponseField name="isComplete()" type="bool">
+  Check if payment is complete
+</ResponseField>
+
+### Example Usage
+
+```php
+use App\Enums\PaymentStatus;
+
+$order->payment_status = PaymentStatus::UNPAID;
+
+if ($order->payment_status->canTransitionTo(PaymentStatus::PARTIAL)) {
+    $order->payment_status = PaymentStatus::PARTIAL;
+    $order->save();
+}
+
+if ($order->payment_status->isComplete()) {
+    // Process fulfillment
+}
+
+echo $order->payment_status->label(); // "Unpaid"
+echo $order->payment_status->color(); // "error"
+```
+
+---
+
+## UserRole
+
+Defines the 8-level role hierarchy with permissions and authorization levels.
+
+**Location**: `app/Enums/UserRole.php`
+
+### Values
+
+<ParamField path="SUPER_ADMIN" type="string" value="super_admin">
+  Platform administrator (level 999)
+</ParamField>
+
+<ParamField path="OWNER" type="string" value="owner">
+  Tenant owner (level 100)
+</ParamField>
+
+<ParamField path="GENERAL_MANAGER" type="string" value="general_manager">
+  Manages multiple stores (level 80)
+</ParamField>
+
+<ParamField path="STORE_MANAGER" type="string" value="store_manager">
+  Manages single store (level 60)
+</ParamField>
+
+<ParamField path="ASSISTANT_MANAGER" type="string" value="assistant_manager">
+  Supports store manager (level 50)
+</ParamField>
+
+<ParamField path="SALES_REP" type="string" value="sales_rep">
+  Sales focused (level 40)
+</ParamField>
+
+<ParamField path="CASHIER" type="string" value="cashier">
+  Processes sales (level 30)
+</ParamField>
+
+<ParamField path="INVENTORY_CLERK" type="string" value="inventory_clerk">
+  Manages stock (level 30)
+</ParamField>
+
+### Role Hierarchy
+
+```
+Super Admin (999)
+  └─ Owner (100)
+      └─ General Manager (80)
+          └─ Store Manager (60)
+              └─ Assistant Manager (50)
+                  └─ Sales Rep (40)
+                      └─ Cashier (30)
+                      └─ Inventory Clerk (30)
+```
+
+### Methods
+
+<ResponseField name="label()" type="string">
+  Role display name
+</ResponseField>
+
+<ResponseField name="description()" type="string">
+  Role responsibilities description
+</ResponseField>
+
+<ResponseField name="level()" type="int">
+  Hierarchy level (higher = more authority)
+</ResponseField>
+
+<ResponseField name="permissions()" type="array">
+  Array of permission strings
+</ResponseField>
+
+<ResponseField name="hasPermission(permission)" type="bool">
+  Check if role has specific permission
+</ResponseField>
+
+<ResponseField name="canAccessMultipleStores()" type="bool">
+  Check if role can access multiple stores
+</ResponseField>
+
+<ResponseField name="isSuperAdmin()" type="bool">
+  Check if role is super admin
+</ResponseField>
+
+### Example Usage
+
+```php
+use App\Enums\UserRole;
+
+$user->role = UserRole::STORE_MANAGER;
+
+echo $user->role->label(); // "Store Manager"
+echo $user->role->level(); // 60
+
+if ($user->role->hasPermission('manage_inventory')) {
+    // Allow inventory management
+}
+
+if ($user->role->canAccessMultipleStores()) {
+    // Show all stores
+} else {
+    // Show only assigned store
+}
+
+// Compare role levels
+if ($requester->role->level() >= UserRole::GENERAL_MANAGER->level()) {
+    // Allow cross-store operations
+}
+
+// Get permissions
+$permissions = $user->role->permissions();
+// ['manage_store_users', 'view_store_reports', ...]
+
+// For dropdown (excludes super admin)
+$roles = UserRole::forSelect();
+```
+
+---
+
+## Additional Enums
+
+<Tabs>
+  <Tab title="StockMovementType">
+    **Location**: `app/Enums/StockMovementType.php`
+    
+    Types of inventory movements for audit trail.
+    
+    ### Values
+    - `SALE` - Stock sold to customer
+    - `PURCHASE` - Stock received from supplier
+    - `RETURN` - Customer return
+    - `ADJUSTMENT` - Manual stock adjustment
+    - `TRANSFER_IN` - Transfer from another location
+    - `TRANSFER_OUT` - Transfer to another location
+    - `DAMAGED` - Damaged/expired stock writeoff
+    - `LOST` - Lost/stolen stock
+    
+    ```php
+    use App\Enums\StockMovementType;
+    
+    $movement->type = StockMovementType::SALE;
+    echo $movement->type->label(); // "Sale"
+    ```
+  </Tab>
+  
+  <Tab title="PaymentMethod">
+    **Location**: `app/Enums/PaymentMethod.php`
+    
+    Payment methods accepted in the system.
+    
+    ### Values
+    - `CASH` - Cash payment
+    - `CARD` - Card payment (debit/credit)
+    - `MOBILE_MONEY` - Mobile money transfer
+    - `BANK_TRANSFER` - Bank transfer
+    - `CREDIT` - Customer credit account
+    - `PAYSTACK` - Paystack gateway
+    - `FLUTTERWAVE` - Flutterwave gateway
+    - `OPAY` - OPay gateway
+    
+    ```php
+    use App\Enums\PaymentMethod;
+    
+    $payment->method = PaymentMethod::CASH;
+    echo $payment->method->label(); // "Cash"
+    ```
+  </Tab>
+  
+  <Tab title="OrderType">
+    **Location**: `app/Enums/OrderType.php`
+    
+    Types of orders in the system.
+    
+    ### Values
+    - `POS` - Point of sale transaction
+    - `CUSTOMER` - Customer online order
+    - `INTERNAL` - Internal transfer/requisition
+    
+    ### Methods
+    - `salesTypes()` - Get types that count as sales (POS, CUSTOMER)
+    
+    ```php
+    use App\Enums\OrderType;
+    
+    $order->order_type = OrderType::POS;
+    echo $order->order_type->label(); // "POS Sale"
+    
+    if (in_array($order->order_type, OrderType::salesTypes())) {
+        // Count as revenue
+    }
+    ```
+  </Tab>
+  
+  <Tab title="PayrollStatus">
+    **Location**: `app/Enums/PayrollStatus.php`
+    
+    Status of payroll processing runs.
+    
+    ### Values
+    - `DRAFT` - Pay run in draft state
+    - `PENDING_APPROVAL` - Awaiting manager approval
+    - `APPROVED` - Approved, ready for payment
+    - `PROCESSING` - Payment in progress
+    - `PAID` - All payments completed
+    - `PARTIALLY_PAID` - Some payments completed
+    - `CANCELLED` - Pay run cancelled
+    
+    ```php
+    use App\Enums\PayrollStatus;
+    
+    $payRun->status = PayrollStatus::DRAFT;
+    
+    if ($payRun->status->canTransitionTo(PayrollStatus::APPROVED)) {
+        $payRun->status = PayrollStatus::APPROVED;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Enum Best Practices
+
+<Accordion title="Database Storage">
+  Store enum values as strings in database:
+  
+  ```php
+  // Migration
+  $table->string('status')->default('pending');
+  $table->string('payment_method')->nullable();
+  
+  // Model cast
+  protected $casts = [
+      'status' => OrderStatus::class,
+      'payment_method' => PaymentMethod::class,
+  ];
+  ```
+</Accordion>
+
+<Accordion title="Validation">
+  Use enum validation rules:
+  
+  ```php
+  use Illuminate\Validation\Rules\Enum;
+  
+  'status' => ['required', new Enum(OrderStatus::class)],
+  'payment_method' => ['nullable', new Enum(PaymentMethod::class)],
+  ```
+</Accordion>
+
+<Accordion title="API Responses">
+  Include enum metadata in API responses:
+  
+  ```php
+  return [
+      'status' => $order->status->value,
+      'status_label' => $order->status->label(),
+      'status_color' => $order->status->color(),
+  ];
+  ```
+</Accordion>
+
+<Accordion title="Select Options">
+  Use forSelect() method for dropdowns:
+  
+  ```php
+  $statuses = OrderStatus::forSelect();
+  // ['pending' => 'Pending', 'confirmed' => 'Confirmed', ...]
+  
+  // In Inertia props
+  return Inertia::render('Orders/Create', [
+      'statuses' => OrderStatus::forSelect(),
+  ]);
+  ```
+</Accordion>
+
+<Accordion title="State Transitions">
+  Always validate transitions:
+  
+  ```php
+  if (!$order->status->canTransitionTo($newStatus)) {
+      throw new \Exception(
+          "Cannot transition from {$order->status->value} to {$newStatus->value}"
+      );
+  }
+  
+  $order->status = $newStatus;
+  $order->save();
+  ```
+</Accordion>

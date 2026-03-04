@@ -1,0 +1,579 @@
+---
+title: "Multi-Tenancy"
+description: "Understanding ShelfWise's multi-tenant architecture and tenant isolation"
+---
+
+ShelfWise is built as a multi-tenant application from the ground up. Each business operates as an isolated tenant with complete data separation and independent configuration.
+
+## What is Multi-Tenancy?
+
+Multi-tenancy allows multiple organizations (tenants) to use the same ShelfWise installation while keeping their data completely separate. Each tenant has:
+
+- Isolated database records
+- Independent user accounts
+- Separate shops and inventory
+- Custom configuration and settings
+- Isolated financial data
+
+<Info>
+  Think of each tenant as a completely separate business using ShelfWise. Tenant A cannot see or access any data from Tenant B.
+</Info>
+
+## Tenant Model
+
+Every tenant in ShelfWise is represented by a record in the `tenants` table:
+
+```php app/Models/Tenant.php
+class Tenant extends Model
+{
+    protected $fillable = [
+        'name',               // Business name
+        'slug',               // URL-friendly identifier
+        'owner_email',        // Primary contact email
+        'business_type',      // retail, wholesale, etc.
+        'phone',
+        'logo_path',
+        'settings',           // JSON configuration
+        'is_active',          // Account status
+        'subscription_plan',  // trial, basic, premium
+        'trial_ends_at',
+        'subscription_ends_at',
+        'max_shops',          // Subscription limits
+        'max_users',
+        'max_products',
+    ];
+}
+```
+
+### Tenant Lifecycle
+
+<Steps>
+  <Step title="Tenant Registration">
+    When a new business signs up, a tenant record is created:
+
+    ```php
+    $tenant = Tenant::create([
+        'name' => 'Acme Retail Corp',
+        'slug' => 'acme-retail',
+        'owner_email' => 'owner@acme.com',
+        'subscription_plan' => 'trial',
+        'trial_ends_at' => now()->addDays(14),
+        'max_shops' => 10,
+        'max_users' => 10,
+        'max_products' => 100,
+    ]);
+    ```
+  </Step>
+
+  <Step title="Owner User Creation">
+    The tenant owner user is created and linked:
+
+    ```php
+    $user = User::create([
+        'tenant_id' => $tenant->id,
+        'first_name' => 'John',
+        'last_name' => 'Doe',
+        'email' => 'owner@acme.com',
+        'password' => Hash::make('password'),
+        'is_tenant_owner' => true,
+        'role' => UserRole::OWNER,
+    ]);
+    ```
+  </Step>
+
+  <Step title="First Shop Setup">
+    Every tenant needs at least one shop:
+
+    ```php
+    $shop = Shop::create([
+        'tenant_id' => $tenant->id,
+        'name' => 'Main Store',
+        'currency' => 'USD',
+        'currency_symbol' => '$',
+        'currency_decimals' => 2,
+    ]);
+    ```
+  </Step>
+</Steps>
+
+## Data Isolation
+
+ShelfWise enforces tenant isolation at the database level. Every tenant-scoped model has a `tenant_id` foreign key.
+
+### Tenant-Scoped Models
+
+All these models belong to a tenant:
+
+- `User` - Staff members
+- `Shop` - Store locations
+- `Product` and `ProductVariant` - Inventory items
+- `Order`, `OrderItem`, `OrderPayment` - Sales data
+- `Customer` - E-commerce customers
+- `Supplier` and `SupplierConnection` - Supplier relationships
+- `PurchaseOrder` - Procurement
+- `StockMovement` - Inventory changes
+- `Payslip`, `PayRun` - Payroll data
+
+### BelongsToTenant Trait
+
+Models use the `BelongsToTenant` trait for automatic tenant scoping:
+
+```php app/Traits/BelongsToTenant.php
+trait BelongsToTenant
+{
+    protected static function bootBelongsToTenant()
+    {
+        static::addGlobalScope('tenant', function ($query) {
+            if (auth()->check() && auth()->user()->tenant_id) {
+                $query->where('tenant_id', auth()->user()->tenant_id);
+            }
+        });
+    }
+
+    public function tenant()
+    {
+        return $this->belongsTo(Tenant::class);
+    }
+}
+```
+
+Example usage:
+
+```php app/Models/Product.php
+class Product extends Model
+{
+    use BelongsToTenant;
+
+    // Queries are automatically scoped to current user's tenant
+}
+```
+
+<Warning>
+  **CRITICAL**: Every database query MUST filter by `tenant_id`. This is enforced by the `BelongsToTenant` trait and global scopes, but always verify when writing raw queries.
+</Warning>
+
+### Querying Tenant Data
+
+Always use the explicit query builder pattern:
+
+<CodeGroup>
+```php Correct
+// Automatic tenant scoping via global scope
+$products = Product::query()->where('is_active', true)->get();
+
+// Or explicitly filter by tenant
+$products = Product::query()
+    ->where('tenant_id', auth()->user()->tenant_id)
+    ->get();
+
+// Using services (recommended)
+$products = app(ProductService::class)->getAllProducts();
+```
+
+```php Incorrect
+// Never do this - might return data from other tenants!
+$products = Product::all();
+
+// Never do this - bypasses tenant scoping
+$products = DB::table('products')->get();
+```
+</CodeGroup>
+
+## Role-Based Access Control
+
+ShelfWise implements an 8-level role hierarchy:
+
+```php app/Enums/UserRole.php
+enum UserRole: string
+{
+    case SUPER_ADMIN = 'super_admin';        // Level 999
+    case OWNER = 'owner';                    // Level 100
+    case GENERAL_MANAGER = 'general_manager'; // Level 80
+    case STORE_MANAGER = 'store_manager';    // Level 60
+    case ASSISTANT_MANAGER = 'assistant_manager'; // Level 50
+    case SALES_REP = 'sales_rep';            // Level 40
+    case INVENTORY_CLERK = 'inventory_clerk'; // Level 30
+    case CASHIER = 'cashier';                 // Level 30
+}
+```
+
+### Role Hierarchy
+
+```
+Super Admin (999) - Platform administrator, can access all tenants
+    |
+    └─ Owner (100) - Tenant owner, full access to their tenant
+          |
+          └─ General Manager (80) - Can manage all operations
+                |
+                └─ Store Manager (60) - Manages specific shops
+                      |
+                      └─ Assistant Manager (50) - Limited management
+                            |
+                            └─ Sales Rep (40) - Sales and customer management
+                                  |
+                                  ├─ Inventory Clerk (30) - Stock management
+                                  └─ Cashier (30) - POS operations only
+```
+
+### Authorization with Policies
+
+ShelfWise uses Laravel Policies for authorization:
+
+```php app/Policies/ProductPolicy.php
+class ProductPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return $user->hasPermission('products.view');
+    }
+
+    public function create(User $user): bool
+    {
+        return $user->hasPermission('products.create');
+    }
+
+    public function update(User $user, Product $product): bool
+    {
+        // Verify tenant ownership
+        if ($product->tenant_id !== $user->tenant_id) {
+            return false;
+        }
+
+        return $user->hasPermission('products.edit');
+    }
+
+    public function delete(User $user, Product $product): bool
+    {
+        if ($product->tenant_id !== $user->tenant_id) {
+            return false;
+        }
+
+        return $user->hasPermission('products.delete');
+    }
+}
+```
+
+### Checking Permissions in Controllers
+
+```php app/Http/Controllers/ProductController.php
+use Illuminate\Support\Facades\Gate;
+
+class ProductController extends Controller
+{
+    public function store(StoreProductRequest $request)
+    {
+        Gate::authorize('create', Product::class);
+
+        $product = app(ProductService::class)->createProduct(
+            $request->validated()
+        );
+
+        return redirect()->route('products.index');
+    }
+
+    public function update(UpdateProductRequest $request, Product $product)
+    {
+        Gate::authorize('update', $product);
+
+        $product = app(ProductService::class)->updateProduct(
+            $product,
+            $request->validated()
+        );
+
+        return redirect()->route('products.show', $product);
+    }
+}
+```
+
+<Note>
+  Form Requests always return `true` in the `authorize()` method. Authorization is handled in controllers via `Gate::authorize()` which calls the Policy.
+</Note>
+
+## Tenant Subscription Management
+
+### Subscription Plans
+
+ShelfWise supports multiple subscription tiers:
+
+- **Trial**: 14-day free trial with limited resources
+- **Basic**: Small businesses with moderate limits
+- **Premium**: Unlimited resources for large enterprises
+
+### Checking Subscription Status
+
+```php
+$tenant = auth()->user()->tenant;
+
+// Check if on trial
+if ($tenant->isOnTrial()) {
+    $daysRemaining = $tenant->getRemainingDays();
+    // Show trial banner
+}
+
+// Check if trial expired
+if ($tenant->isTrialExpired()) {
+    // Prompt for subscription
+}
+
+// Check active subscription
+if ($tenant->hasActiveSubscription()) {
+    // Allow access
+}
+```
+
+### Resource Limits
+
+Tenants have resource limits based on their subscription:
+
+```php
+// Check if tenant can create more shops
+if ($tenant->hasReachedShopLimit()) {
+    return back()->withErrors([
+        'error' => 'You have reached your shop limit. Please upgrade your plan.'
+    ]);
+}
+
+// Check user limit
+if ($tenant->hasReachedUserLimit()) {
+    return back()->withErrors([
+        'error' => 'You have reached your user limit. Please upgrade your plan.'
+    ]);
+}
+
+// Check product limit
+if ($tenant->hasReachedProductLimit()) {
+    return back()->withErrors([
+        'error' => 'You have reached your product limit. Please upgrade your plan.'
+    ]);
+}
+```
+
+## Tenant Context in Frontend
+
+Inertia.js shares tenant data globally:
+
+```php app/Http/Middleware/HandleInertiaRequests.php
+public function share(Request $request): array
+{
+    return array_merge(parent::share($request), [
+        'auth' => [
+            'user' => $request->user(),
+            'tenant' => $request->user()?->tenant,
+        ],
+    ]);
+}
+```
+
+Access in React components:
+
+```tsx resources/js/components/Header.tsx
+import { usePage } from '@inertiajs/react';
+
+function Header() {
+    const { auth } = usePage().props;
+
+    return (
+        <header>
+            <h1>{auth.tenant.name}</h1>
+            {auth.tenant.logo_path && (
+                <img src={auth.tenant.logo_path} alt="Logo" />
+            )}
+        </header>
+    );
+}
+```
+
+## Multi-Tenant Testing
+
+When writing tests, always create tenant context:
+
+```php tests/Feature/ProductTest.php
+use App\Models\Tenant;
+use App\Models\User;
+use App\Models\Product;
+
+test('user can only view products in their tenant', function () {
+    $tenant1 = Tenant::factory()->create();
+    $tenant2 = Tenant::factory()->create();
+
+    $user1 = User::factory()->for($tenant1)->create();
+    $user2 = User::factory()->for($tenant2)->create();
+
+    $product1 = Product::factory()->for($tenant1)->create();
+    $product2 = Product::factory()->for($tenant2)->create();
+
+    actingAs($user1)
+        ->get(route('products.index'))
+        ->assertSee($product1->name)
+        ->assertDontSee($product2->name);
+
+    actingAs($user2)
+        ->get(route('products.index'))
+        ->assertSee($product2->name)
+        ->assertDontSee($product1->name);
+});
+```
+
+## Tenant Switching (Super Admin)
+
+Super admins can switch between tenants for support purposes:
+
+```php
+// Check if user is super admin
+if ($user->isSuperAdmin()) {
+    // Allow tenant switching
+    session(['impersonate_tenant_id' => $tenantId]);
+}
+
+// In global scope, check for impersonation
+if (auth()->user()->isSuperAdmin() && session('impersonate_tenant_id')) {
+    $query->where('tenant_id', session('impersonate_tenant_id'));
+} else {
+    $query->where('tenant_id', auth()->user()->tenant_id);
+}
+```
+
+<Warning>
+  Tenant switching should only be available to super admins and must be audited. Log every tenant switch for security.
+</Warning>
+
+## Tenant Data Migration
+
+When running migrations, tenant-scoped tables include `tenant_id`:
+
+```php database/migrations/xxxx_create_products_table.php
+Schema::create('products', function (Blueprint $table) {
+    $table->id();
+    $table->foreignIdFor(Tenant::class)->constrained()->cascadeOnDelete();
+    $table->foreignIdFor(Shop::class)->constrained()->cascadeOnDelete();
+    $table->string('name');
+    $table->string('sku')->unique();
+    // ... other columns
+    $table->timestamps();
+    $table->softDeletes();
+
+    // Indexes for tenant isolation
+    $table->index(['tenant_id', 'shop_id']);
+    $table->index(['tenant_id', 'is_active']);
+});
+```
+
+<Info>
+  The `->constrained()->cascadeOnDelete()` ensures that when a tenant is deleted, all their data is automatically removed.
+</Info>
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always filter by tenant_id">
+    Every query must filter by `tenant_id` to prevent data leaks:
+
+    ```php
+    // Use global scopes via BelongsToTenant trait
+    Product::query()->get();
+
+    // Or explicitly filter
+    Product::query()->where('tenant_id', auth()->user()->tenant_id)->get();
+    ```
+  </Accordion>
+
+  <Accordion title="Validate tenant ownership in policies">
+    Always verify tenant ownership in authorization:
+
+    ```php
+    public function update(User $user, Product $product): bool
+    {
+        if ($product->tenant_id !== $user->tenant_id) {
+            return false;
+        }
+
+        return $user->hasPermission('products.edit');
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Never expose tenant_id in URLs">
+    Don't use `/tenants/{tenant_id}/products`. Use:
+    - `/products` - Tenant is inferred from authenticated user
+    - Or tenant-specific subdomains: `acme.shelfwise.com`
+  </Accordion>
+
+  <Accordion title="Audit tenant access">
+    Log all tenant data access for security auditing:
+
+    ```php
+    Log::info('Product accessed', [
+        'user_id' => auth()->id(),
+        'tenant_id' => auth()->user()->tenant_id,
+        'product_id' => $product->id,
+    ]);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Creating Tenant-Scoped Records
+
+```php
+// In services, always set tenant_id
+class ProductService
+{
+    public function createProduct(array $data): Product
+    {
+        return Product::query()->create([
+            'tenant_id' => auth()->user()->tenant_id,
+            'shop_id' => $data['shop_id'],
+            'name' => $data['name'],
+            // ...
+        ]);
+    }
+}
+```
+
+### Querying Related Tenant Data
+
+```php
+// Get user's shops
+$shops = Shop::query()
+    ->where('tenant_id', auth()->user()->tenant_id)
+    ->get();
+
+// Get orders for a shop (automatically tenant-scoped)
+$orders = Order::query()
+    ->where('shop_id', $shopId)
+    ->get();
+```
+
+### Cross-Tenant Relationships (Suppliers)
+
+Suppliers can serve multiple tenants:
+
+```php
+$supplierConnection = SupplierConnection::query()->create([
+    'supplier_tenant_id' => $supplierTenant->id,
+    'buyer_tenant_id' => $buyerTenant->id,
+    'status' => 'pending',
+]);
+```
+
+## What's Next?
+
+<CardGroup cols={2}>
+  <Card title="Authorization" icon="shield-halved" href="/architecture/authorization">
+    Learn how to manage staff members and permissions
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/setup/configuration">
+    Set up and configure multiple shop locations
+  </Card>
+  
+  <Card title="Database Schema" icon="database" href="/architecture/database-schema">
+    Understand the multi-tenant database structure
+  </Card>
+  
+  <Card title="Service Layer" icon="layer-group" href="/architecture/service-layer">
+    Deep dive into ShelfWise's service architecture
+  </Card>
+</CardGroup>

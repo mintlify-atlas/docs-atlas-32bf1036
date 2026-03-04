@@ -1,0 +1,371 @@
+---
+title: Point of Sale
+description: Learn how to use ShelfWise POS for fast, efficient in-store sales with offline support and real-time inventory tracking
+---
+
+The ShelfWise Point of Sale (POS) system provides a fast, intuitive interface for processing in-store sales with features like barcode scanning, offline mode, customer management, and held sales.
+
+## Overview
+
+The POS system is designed for high-volume retail environments where speed and reliability are critical. It includes:
+
+- Real-time product search with barcode scanning
+- Offline-first architecture with automatic sync
+- Held sales for managing multiple transactions
+- Customer association and search
+- Multiple payment methods (cash, card, mobile money)
+- Automatic inventory deduction and stock movement tracking
+- Receipt generation
+
+## Accessing the POS
+
+Navigate to a shop and click "Point of Sale" or use the quick action menu. You need `shop.manage` permission to access POS.
+
+```php
+// POSController.php:32
+public function index(Shop $shop): Response
+{
+    $this->authorize('shop.manage', $shop);
+
+    return Inertia::render('POS/Index', [
+        'shop' => $shop,
+        'paymentMethods' => PaymentMethod::posOptions(),
+        'heldSalesCount' => $this->heldSaleService->getActiveCount($shop),
+    ]);
+}
+```
+
+## Processing a Sale
+
+<Steps>
+  <Step title="Search for Products">
+    Use the search bar to find products by:
+    - Barcode (scan or type)
+    - SKU
+    - Product name
+
+    The system searches across all product variants in the shop:
+
+    ```php
+    // POSService.php:28
+    public function searchProducts(Shop $shop, string $query, int $limit = 20)
+    {
+        return ProductVariant::query()
+            ->whereHas('product', function ($q) use ($shop) {
+                $q->where('tenant_id', auth()->user()->tenant_id)
+                    ->where('shop_id', $shop->id);
+            })
+            ->where(function ($q) use ($query) {
+                $q->where('sku', 'like', "%{$query}%")
+                    ->orWhere('barcode', 'like', "%{$query}%")
+                    ->orWhereHas('product', function ($q) use ($query) {
+                        $q->where('name', 'like', "%{$query}%");
+                    });
+            })
+            ->with(['product', 'packagingTypes'])
+            ->limit($limit)
+            ->get();
+    }
+    ```
+
+    If a single exact match is found (barcode or SKU), the product is automatically added to cart.
+  </Step>
+
+  <Step title="Add Items to Cart">
+    Click on products to add them to the cart. Once added, you can:
+    - Adjust quantities using +/- buttons
+    - Remove items by clicking the X button
+    - View real-time price calculations
+  </Step>
+
+  <Step title="Add Customer (Optional)">
+    Search for and select a customer to associate with the sale. The POS supports role-based customer visibility:
+
+    ```php
+    // POSService.php:210
+    public function searchCustomers(string $query, Shop $shop, int $limit = 10)
+    {
+        $user = auth()->user();
+        $customerQuery = Customer::where('tenant_id', $user->tenant_id)
+            ->where(function ($q) use ($query) {
+                $q->where('first_name', 'like', "%{$query}%")
+                    ->orWhere('last_name', 'like', "%{$query}%")
+                    ->orWhere('email', 'like', "%{$query}%")
+                    ->orWhere('phone', 'like', "%{$query}%");
+            });
+
+        // High-level roles see all customers, others see shop-specific
+        if (! $user->role->canAccessMultipleStores()) {
+            $customerQuery->forShop($shop->id);
+        }
+
+        return $customerQuery->limit($limit)->get();
+    }
+    ```
+  </Step>
+
+  <Step title="Apply Discounts">
+    Enter a discount amount in the discount field. The system automatically recalculates the total.
+  </Step>
+
+  <Step title="Select Payment Method">
+    Choose from available payment methods:
+    - **Cash** - Shows change calculator when amount tendered is entered
+    - **Card** - Credit/debit card payments
+    - **Mobile Money** - Mobile payment options
+
+    For cash payments, enter the amount tendered to automatically calculate change.
+  </Step>
+
+  <Step title="Complete Sale">
+    Click the "PAY" button to complete the transaction. The system will:
+    1. Validate stock availability
+    2. Create an order with status `DELIVERED` and payment status `PAID`
+    3. Deduct inventory using pessimistic locking to prevent race conditions
+    4. Record stock movements for audit trail
+    5. Generate a receipt
+  </Step>
+</Steps>
+
+## Quick Sale Processing
+
+When you complete a sale, the system executes a transactional process to ensure data integrity:
+
+```php
+// POSService.php:53
+public function createQuickSale(
+    Shop $shop,
+    array $items,
+    ?int $customerId = null,
+    string $paymentMethod = 'cash',
+    float $amountTendered = 0,
+    array $options = []
+): Order {
+    return DB::transaction(function () use ($shop, $items, $customerId, $paymentMethod, $amountTendered, $options) {
+        // Fetch variants and lock inventory locations
+        $locations = InventoryLocation::where('location_type', Shop::class)
+            ->where('location_id', $shop->id)
+            ->whereIn('product_variant_id', $variantIds)
+            ->lockForUpdate()  // Prevents race conditions
+            ->get();
+
+        // Validate stock availability
+        foreach ($items as $item) {
+            $this->validateStockAvailability($variant, $item['quantity'], $shop->id);
+        }
+
+        // Create order with immediate delivery status
+        $order = Order::create([
+            'order_type' => OrderType::POS->value,
+            'status' => OrderStatus::DELIVERED->value,
+            'payment_status' => PaymentStatus::PAID->value,
+            'confirmed_at' => now(),
+            'delivered_at' => now(),
+        ]);
+
+        // Create order items and record stock movements
+        foreach ($items as $item) {
+            OrderItem::create([...]);
+
+            // Record stock movement for audit trail
+            $this->stockMovementService->recordSale(
+                variant: $variant,
+                location: $location,
+                quantity: $quantity,
+                referenceNumber: "POS-{$order->order_number}",
+                notes: "POS Sale - Order {$order->order_number}"
+            );
+        }
+
+        // Record payment
+        OrderPayment::create([...]);
+
+        return $order;
+    });
+}
+```
+
+<Note>
+**Pessimistic Locking**: The POS uses `lockForUpdate()` on inventory locations to prevent race conditions when multiple cashiers are processing sales simultaneously.
+</Note>
+
+## Offline Mode
+
+The POS supports full offline operation using IndexedDB for local storage:
+
+### Product Sync
+
+- Products are automatically synced to the browser on load
+- Search operates entirely on local data when offline
+- Sync button manually refreshes product data
+
+### Offline Sales
+
+- Sales are queued locally when offline
+- Automatically sync when connection is restored
+- Each offline sale gets a unique offline ID
+- Visual indicator shows pending sync count
+
+```typescript
+// From POS/Index.tsx
+const { cart, completeSale, pendingOrdersCount, syncPendingOrders } = useOfflinePOS({
+    shopId: shop.id,
+    tenantId: shop.tenant_id,
+    onOrderSynced: (offlineId, orderId, orderNumber) => {
+        toast.success(`Order ${orderNumber} synced successfully`);
+    },
+    onSyncError: (offlineId, error) => {
+        toast.error(`Failed to sync order: ${error}`);
+    },
+});
+```
+
+<Warning>
+Offline sales are stored in the browser's IndexedDB. Clearing browser data will delete unsynced sales. Always sync before clearing browser data.
+</Warning>
+
+## Held Sales
+
+Hold a sale to temporarily pause and resume it later - useful when serving multiple customers or waiting for customer decisions.
+
+### Holding a Sale
+
+<Steps>
+  <Step title="Add Items to Cart">
+    Add products and optionally select a customer.
+  </Step>
+
+  <Step title="Click Hold Button">
+    Click the pause icon button to hold the current sale.
+  </Step>
+
+  <Step title="Receive Hold Reference">
+    The system generates a unique reference like `HOLD-20240304-0001`.
+  </Step>
+</Steps>
+
+```php
+// HeldSaleService (called from POSController.php:182)
+public function holdSale(
+    Shop $shop,
+    array $items,
+    ?int $customerId = null,
+    ?string $notes = null
+): HeldSale {
+    $holdReference = 'HOLD-' . now()->format('Ymd') . '-' . 
+                     str_pad($this->getNextSequence($shop), 4, '0', STR_PAD_LEFT);
+
+    return HeldSale::create([
+        'tenant_id' => auth()->user()->tenant_id,
+        'shop_id' => $shop->id,
+        'customer_id' => $customerId,
+        'hold_reference' => $holdReference,
+        'items' => $items,
+        'notes' => $notes,
+        'held_by' => auth()->id(),
+    ]);
+}
+```
+
+### Retrieving a Held Sale
+
+1. Click the "X Held" button in the header (only shows if held sales exist)
+2. Browse held sales with customer names and hold times
+3. Click "Retrieve" to load the sale back into the cart
+4. Complete the sale normally
+
+<Note>
+Held sales do NOT reserve inventory. Stock is only deducted when the sale is completed.
+</Note>
+
+## Session Summary
+
+View real-time sales statistics for your current session:
+
+```php
+// POSService.php:234
+public function getSessionSummary(Shop $shop, ?string $startDate = null, ?string $endDate = null): array
+{
+    $query = Order::where('tenant_id', auth()->user()->tenant_id)
+        ->where('shop_id', $shop->id)
+        ->where('created_by', auth()->id())
+        ->where('order_type', OrderType::POS)
+        ->where('status', OrderStatus::DELIVERED);
+
+    if ($startDate) {
+        $query->where('created_at', '>=', Carbon::parse($startDate)->startOfDay());
+    }
+    if ($endDate) {
+        $query->where('created_at', '<=', Carbon::parse($endDate)->endOfDay());
+    }
+
+    $orders = $query->get();
+
+    return [
+        'total_sales' => $orders->count(),
+        'total_revenue' => $orders->sum('total_amount'),
+        'total_tax' => $orders->sum('tax_amount'),
+        'cash_sales' => $orders->where('payment_method', 'cash')->sum('total_amount'),
+        'card_sales' => $orders->where('payment_method', 'card')->sum('total_amount'),
+        'mobile_money_sales' => $orders->where('payment_method', 'mobile_money')->sum('total_amount'),
+    ];
+}
+```
+
+## Barcode Scanning
+
+The POS supports multiple barcode scanning methods:
+
+1. **USB Barcode Scanner** - Works automatically, scanner types into search field
+2. **Camera Scanning** - Click camera icon to use device camera
+3. **Manual Entry** - Type barcode or SKU directly
+
+All methods trigger the same search logic and auto-add exact matches to cart.
+
+## Tax Calculation
+
+If VAT is enabled for the shop, tax is automatically calculated per line item:
+
+```php
+// POSService.php:116
+$lineTax = 0;
+if (($shop->vat_enabled ?? false) && ($variant->product->is_taxable ?? false)) {
+    $lineTax = $taxableAmount * (($shop->vat_rate ?? 0) / 100);
+}
+```
+
+Tax is applied to the taxable amount (line total minus discounts).
+
+## Best Practices
+
+<Steps>
+  <Step title="Keep Products Synced">
+    Regularly sync products to ensure pricing and stock data is current, especially in offline mode.
+  </Step>
+
+  <Step title="Use Barcode Scanners">
+    Barcode scanning is 5-10x faster than manual search for high-volume retail.
+  </Step>
+
+  <Step title="Hold Sales Strategically">
+    Use held sales for:
+    - Customers who need to step away
+    - Price checks or manager approvals
+    - Managing queues during peak hours
+  </Step>
+
+  <Step title="Sync Offline Sales Promptly">
+    Offline sales don't appear in reports until synced. Sync regularly to keep data current.
+  </Step>
+
+  <Step title="Count Cash Drawer Regularly">
+    Use the session summary to reconcile cash payments at shift changes.
+  </Step>
+</Steps>
+
+## Related Resources
+
+- [Orders](/features/sales/orders) - View and manage completed POS sales
+- [Returns](/features/sales/returns) - Process returns for POS sales
+- [Receipts](/features/sales/receipts) - Print and email receipts
+- [Stock Movements](/features/inventory/stock-movements) - View stock movements from POS sales

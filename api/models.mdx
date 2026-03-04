@@ -1,0 +1,735 @@
+---
+title: Models
+description: Eloquent models representing ShelfWise data structures and relationships
+---
+
+ShelfWise models follow Laravel Eloquent ORM conventions with multi-tenant isolation, UUID primary keys, and comprehensive relationship definitions.
+
+## Model Conventions
+
+- **UUID Primary Keys**: All models use UUID via `HasUuid` trait
+- **Tenant Isolation**: `BelongsToTenant` trait ensures data segregation
+- **Soft Deletes**: Most models support soft deletion for data recovery
+- **Explicit Query Builder**: Always use `Model::query()->` prefix
+
+---
+
+## Product
+
+Represents a product in the inventory system. Products can have multiple variants (sizes, colors) or be standalone items.
+
+**Location**: `app/Models/Product.php`
+
+### Properties
+
+<ParamField path="id" type="int" >
+  Primary key
+</ParamField>
+
+<ParamField path="tenant_id" type="int" required>
+  Tenant owner
+</ParamField>
+
+<ParamField path="shop_id" type="int" required>
+  Shop location
+</ParamField>
+
+<ParamField path="product_type_id" type="int" required>
+  Product type (General, Pharmacy, Retail, etc.)
+</ParamField>
+
+<ParamField path="category_id" type="int">
+  Product category
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Product name
+</ParamField>
+
+<ParamField path="slug" type="string" required>
+  URL-friendly identifier (unique per tenant)
+</ParamField>
+
+<ParamField path="description" type="string">
+  Product description
+</ParamField>
+
+<ParamField path="custom_attributes" type="array">
+  Type-specific attributes (e.g., requires_prescription for pharmacy)
+</ParamField>
+
+<ParamField path="has_variants" type="bool" default="false">
+  Whether product has multiple variants
+</ParamField>
+
+<ParamField path="is_active" type="bool" default="true">
+  Product visibility status
+</ParamField>
+
+<ParamField path="track_stock" type="bool" default="true">
+  Enable inventory tracking
+</ParamField>
+
+<ParamField path="is_taxable" type="bool" default="true">
+  Subject to VAT
+</ParamField>
+
+<ParamField path="is_featured" type="bool" default="false">
+  Featured on storefront
+</ParamField>
+
+### Relationships
+
+<ResponseField name="tenant" type="BelongsTo">
+  Tenant that owns this product
+</ResponseField>
+
+<ResponseField name="shop" type="BelongsTo">
+  Shop where product is sold
+</ResponseField>
+
+<ResponseField name="type" type="BelongsTo">
+  Product type definition
+</ResponseField>
+
+<ResponseField name="category" type="BelongsTo">
+  Product category
+</ResponseField>
+
+<ResponseField name="variants" type="HasMany">
+  Product variants (sizes, colors, etc.)
+</ResponseField>
+
+<ResponseField name="images" type="MorphMany">
+  Product images
+</ResponseField>
+
+### State Management
+
+<Accordion title="is_active vs Soft Deletes">
+  Products use BOTH `is_active` flag AND soft deletes for different purposes:
+  
+  | State    | is_active | deleted_at | Behavior                                                    |
+  |----------|-----------|------------|-------------------------------------------------------------|
+  | Active   | true      | null       | Fully visible: POS, Storefront, Admin, Reports             |
+  | Inactive | false     | null       | Hidden from POS/Storefront, visible in Admin/Reports       |
+  | Deleted  | N/A       | timestamp  | Completely hidden, can be restored via soft delete recovery|
+  
+  **Use is_active = false for**:
+  - Temporarily disable sales (out of season, pending restock)
+  - Hide from customer-facing channels without losing data
+  
+  **Use soft delete for**:
+  - Permanently remove from all active operations
+  - Discontinue product while preserving historical order data
+</Accordion>
+
+### Scopes
+
+```php
+// Get only active products
+Product::query()->active()->get();
+
+// Get products for specific tenant and shop
+Product::query()
+    ->where('tenant_id', $tenant->id)
+    ->where('shop_id', $shop->id)
+    ->get();
+```
+
+### Example
+
+```php
+use App\Models\Product;
+
+$product = Product::query()->create([
+    'tenant_id' => $tenant->id,
+    'shop_id' => $shop->id,
+    'product_type_id' => 1,
+    'category_id' => 5,
+    'name' => 'Pain Relief Tablets',
+    'slug' => 'pain-relief-tablets',
+    'description' => '500mg paracetamol tablets',
+    'has_variants' => false,
+    'is_active' => true,
+    'track_stock' => true,
+    'is_taxable' => true,
+]);
+
+// Load relationships
+$product = Product::query()
+    ->with(['type', 'category', 'variants.packagingTypes'])
+    ->find($productId);
+```
+
+---
+
+## Order
+
+Represents a customer order with status tracking, payments, and fulfillment workflow.
+
+**Location**: `app/Models/Order.php`
+
+### Properties
+
+<ParamField path="id" type="int">
+  Primary key
+</ParamField>
+
+<ParamField path="tenant_id" type="int" required>
+  Tenant owner
+</ParamField>
+
+<ParamField path="shop_id" type="int" required>
+  Shop location
+</ParamField>
+
+<ParamField path="customer_id" type="int">
+  Customer (optional for guest orders)
+</ParamField>
+
+<ParamField path="order_number" type="string">
+  Auto-generated unique order number (ORD-YYYYMMDD-####)
+</ParamField>
+
+<ParamField path="order_type" type="OrderType" required>
+  POS, CUSTOMER, or INTERNAL
+</ParamField>
+
+<ParamField path="status" type="OrderStatus" required>
+  Current order status
+</ParamField>
+
+<ParamField path="payment_status" type="PaymentStatus" required>
+  Payment status (UNPAID, PARTIAL, PAID, REFUNDED)
+</ParamField>
+
+<ParamField path="subtotal" type="decimal">
+  Sum of line items before tax and shipping
+</ParamField>
+
+<ParamField path="tax_amount" type="decimal">
+  Total tax amount
+</ParamField>
+
+<ParamField path="discount_amount" type="decimal">
+  Total discount applied
+</ParamField>
+
+<ParamField path="shipping_cost" type="decimal">
+  Shipping cost
+</ParamField>
+
+<ParamField path="total_amount" type="decimal">
+  Final total including tax and shipping
+</ParamField>
+
+<ParamField path="paid_amount" type="decimal">
+  Amount paid so far
+</ParamField>
+
+### Relationships
+
+<ResponseField name="tenant" type="BelongsTo">
+  Tenant that owns this order
+</ResponseField>
+
+<ResponseField name="shop" type="BelongsTo">
+  Shop where order was placed
+</ResponseField>
+
+<ResponseField name="customer" type="BelongsTo">
+  Customer who placed the order
+</ResponseField>
+
+<ResponseField name="items" type="HasMany">
+  Order line items
+</ResponseField>
+
+<ResponseField name="payments" type="HasMany">
+  Payment records
+</ResponseField>
+
+<ResponseField name="returns" type="HasMany">
+  Return records
+</ResponseField>
+
+<ResponseField name="receipts" type="HasMany">
+  Generated receipts
+</ResponseField>
+
+### Methods
+
+<ResponseField name="canEdit()" type="bool">
+  Check if order can be edited (PENDING or CONFIRMED status)
+</ResponseField>
+
+<ResponseField name="canCancel()" type="bool">
+  Check if order can be cancelled (not DELIVERED, CANCELLED, or REFUNDED)
+</ResponseField>
+
+<ResponseField name="calculateTotals()" type="void">
+  Recalculate order totals from items
+</ResponseField>
+
+<ResponseField name="remainingBalance()" type="float">
+  Get unpaid balance
+</ResponseField>
+
+<ResponseField name="isFullyPaid()" type="bool">
+  Check if order is completely paid
+</ResponseField>
+
+### Scopes
+
+```php
+// Filter by status
+Order::query()->pending()->get();
+Order::query()->active()->get(); // All active statuses
+
+// Filter by type
+Order::query()->posSales()->get();
+Order::query()->customerOrders()->get();
+
+// Filter by shop and tenant
+Order::query()
+    ->forTenant($tenantId)
+    ->forShop($shopId)
+    ->get();
+```
+
+### Example
+
+```php
+use App\Models\Order;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+
+$order = Order::create([
+    'tenant_id' => $tenant->id,
+    'shop_id' => $shop->id,
+    'customer_id' => $customer->id,
+    'order_type' => OrderType::CUSTOMER,
+    'status' => OrderStatus::PENDING,
+    'payment_status' => PaymentStatus::UNPAID,
+    'shipping_cost' => 500.00,
+    'created_by' => auth()->id(),
+]);
+
+// Load with relationships
+$order = Order::query()
+    ->with([
+        'items.productVariant.product',
+        'customer',
+        'payments',
+    ])
+    ->find($orderId);
+
+// Calculate totals
+$order->calculateTotals();
+$order->save();
+
+// Check status
+if ($order->canEdit()) {
+    // Allow editing
+}
+```
+
+---
+
+## Customer
+
+Represents an e-commerce customer (separate from User model which represents staff).
+
+**Location**: `app/Models/Customer.php`
+
+### Properties
+
+<ParamField path="id" type="int">
+  Primary key
+</ParamField>
+
+<ParamField path="tenant_id" type="int" required>
+  Tenant owner
+</ParamField>
+
+<ParamField path="preferred_shop_id" type="int">
+  Default shop for customer
+</ParamField>
+
+<ParamField path="first_name" type="string" required>
+  Customer first name
+</ParamField>
+
+<ParamField path="last_name" type="string" required>
+  Customer last name
+</ParamField>
+
+<ParamField path="email" type="string" required>
+  Customer email (unique per tenant)
+</ParamField>
+
+<ParamField path="phone" type="string">
+  Customer phone number
+</ParamField>
+
+<ParamField path="is_active" type="bool" default="true">
+  Account active status
+</ParamField>
+
+<ParamField path="marketing_opt_in" type="bool" default="false">
+  Marketing communications consent
+</ParamField>
+
+<ParamField path="account_balance" type="decimal">
+  Current balance (for credit accounts)
+</ParamField>
+
+<ParamField path="credit_limit" type="decimal">
+  Maximum credit allowed
+</ParamField>
+
+<ParamField path="total_purchases" type="decimal">
+  Lifetime purchase total
+</ParamField>
+
+### Relationships
+
+<ResponseField name="tenant" type="BelongsTo">
+  Tenant that owns this customer
+</ResponseField>
+
+<ResponseField name="preferredShop" type="BelongsTo">
+  Customer's preferred shop
+</ResponseField>
+
+<ResponseField name="addresses" type="HasMany">
+  Customer addresses
+</ResponseField>
+
+<ResponseField name="orders" type="HasMany">
+  Customer orders
+</ResponseField>
+
+<ResponseField name="carts" type="HasMany">
+  Shopping carts
+</ResponseField>
+
+<ResponseField name="creditTransactions" type="HasMany">
+  Credit transaction history
+</ResponseField>
+
+### Methods
+
+<ResponseField name="availableCredit()" type="float|null">
+  Get remaining credit available
+</ResponseField>
+
+<ResponseField name="canPurchaseOnCredit(amount)" type="bool">
+  Check if customer can make a purchase on credit
+</ResponseField>
+
+<ResponseField name="unpaidOrders()" type="HasMany">
+  Get all orders with unpaid or partial payment status
+</ResponseField>
+
+### Scopes
+
+```php
+// Active customers only
+Customer::query()->active()->get();
+
+// Filter by tenant
+Customer::query()->forTenant($tenantId)->get();
+
+// Filter by shop
+Customer::query()->forShop($shopId)->get();
+```
+
+### Example
+
+```php
+use App\Models\Customer;
+
+$customer = Customer::create([
+    'tenant_id' => $tenant->id,
+    'preferred_shop_id' => $shop->id,
+    'first_name' => 'John',
+    'last_name' => 'Doe',
+    'email' => 'john@example.com',
+    'phone' => '+2348012345678',
+    'password' => Hash::make('password'),
+    'is_active' => true,
+    'credit_limit' => 50000.00,
+]);
+
+// Check credit availability
+if ($customer->canPurchaseOnCredit(25000)) {
+    // Proceed with purchase
+}
+
+// Get available credit
+$available = $customer->availableCredit(); // 50000 - account_balance
+```
+
+---
+
+## Shop
+
+Represents a physical or virtual store location within a tenant.
+
+**Location**: `app/Models/Shop.php`
+
+### Properties
+
+<ParamField path="id" type="int">
+  Primary key
+</ParamField>
+
+<ParamField path="tenant_id" type="int" required>
+  Tenant owner
+</ParamField>
+
+<ParamField path="shop_type_id" type="int" required>
+  Shop type (Retail, Restaurant, Pharmacy, etc.)
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Shop name
+</ParamField>
+
+<ParamField path="slug" type="string" required>
+  URL-friendly identifier
+</ParamField>
+
+<ParamField path="config" type="array">
+  Type-specific configuration
+</ParamField>
+
+<ParamField path="inventory_model" type="InventoryModel">
+  Inventory tracking model (PERPETUAL, PERIODIC)
+</ParamField>
+
+<ParamField path="is_active" type="bool" default="true">
+  Shop active status
+</ParamField>
+
+<ParamField path="storefront_enabled" type="bool" default="false">
+  Enable e-commerce storefront
+</ParamField>
+
+<ParamField path="storefront_settings" type="array">
+  Storefront configuration (shipping, theme, etc.)
+</ParamField>
+
+<ParamField path="currency" type="string" default="NGN">
+  Shop currency code
+</ParamField>
+
+<ParamField path="currency_symbol" type="string" default="₦">
+  Currency symbol
+</ParamField>
+
+<ParamField path="vat_enabled" type="bool" default="false">
+  Enable VAT calculations
+</ParamField>
+
+<ParamField path="vat_rate" type="decimal" default="7.5">
+  VAT rate percentage
+</ParamField>
+
+### Relationships
+
+<ResponseField name="tenant" type="BelongsTo">
+  Tenant that owns this shop
+</ResponseField>
+
+<ResponseField name="type" type="BelongsTo">
+  Shop type definition
+</ResponseField>
+
+<ResponseField name="users" type="BelongsToMany">
+  Staff assigned to this shop
+</ResponseField>
+
+<ResponseField name="products" type="HasMany">
+  Products sold at this shop
+</ResponseField>
+
+<ResponseField name="services" type="HasMany">
+  Services offered at this shop
+</ResponseField>
+
+<ResponseField name="carts" type="HasMany">
+  Shopping carts for this shop
+</ResponseField>
+
+<ResponseField name="taxSettings" type="HasOne">
+  Shop-specific tax settings
+</ResponseField>
+
+### Example
+
+```php
+use App\Models\Shop;
+
+$shop = Shop::query()->create([
+    'tenant_id' => $tenant->id,
+    'shop_type_id' => 1,
+    'name' => 'Main Street Pharmacy',
+    'slug' => 'main-street-pharmacy',
+    'address' => '123 Main Street',
+    'city' => 'Lagos',
+    'state' => 'Lagos',
+    'country' => 'Nigeria',
+    'currency' => 'NGN',
+    'currency_symbol' => '₦',
+    'vat_enabled' => true,
+    'vat_rate' => 7.5,
+    'storefront_enabled' => true,
+]);
+
+// Get shop with users
+$shop = Shop::query()
+    ->with(['users', 'products', 'type'])
+    ->find($shopId);
+```
+
+---
+
+## Additional Models
+
+<Tabs>
+  <Tab title="ProductVariant">
+    **Location**: `app/Models/ProductVariant.php`
+    
+    Represents a specific variant of a product (size, color, etc.)
+    
+    ### Key Properties
+    - `product_id` - Parent product
+    - `sku` - Stock Keeping Unit (unique)
+    - `barcode` - Barcode number
+    - `name` - Variant name (e.g., "Large", "Red")
+    - `attributes` - Variant attributes JSON
+    - `price` - Selling price
+    - `cost_price` - Purchase cost
+    - `base_unit_name` - Base unit (e.g., "Pack", "Bottle")
+    - `reorder_level` - Minimum stock level
+    
+    ### Relationships
+    - `product` - Parent product
+    - `packagingTypes` - Available packaging options
+    - `inventoryLocations` - Stock levels per location
+  </Tab>
+  
+  <Tab title="OrderItem">
+    **Location**: `app/Models/OrderItem.php`
+    
+    Individual line item in an order
+    
+    ### Key Properties
+    - `order_id` - Parent order
+    - `sellable_type` - ProductVariant or ServiceVariant
+    - `sellable_id` - ID of sellable item
+    - `quantity` - Quantity ordered
+    - `unit_price` - Price per unit
+    - `discount_amount` - Line item discount
+    - `tax_amount` - Line item tax
+    - `total_amount` - Line total
+    
+    ### Methods
+    - `isProduct()` - Check if item is a product
+    - `isService()` - Check if item is a service
+  </Tab>
+  
+  <Tab title="StockMovement">
+    **Location**: `app/Models/StockMovement.php`
+    
+    Audit trail for all inventory changes
+    
+    ### Key Properties
+    - `product_variant_id` - Variant affected
+    - `inventory_location_id` - Location
+    - `type` - Movement type (SALE, PURCHASE, ADJUSTMENT, etc.)
+    - `quantity` - Quantity moved (positive or negative)
+    - `quantity_before` - Stock before movement
+    - `quantity_after` - Stock after movement
+    - `reference_number` - Reference (order number, etc.)
+    - `notes` - Movement notes
+    - `recorded_by` - User who recorded movement
+  </Tab>
+  
+  <Tab title="PayRun">
+    **Location**: `app/Models/PayRun.php`
+    
+    Payroll processing run
+    
+    ### Key Properties
+    - `tenant_id` - Tenant owner
+    - `pay_calendar_id` - Pay calendar
+    - `period_start` - Pay period start date
+    - `period_end` - Pay period end date
+    - `status` - PayRunStatus (DRAFT, APPROVED, PAID)
+    - `total_gross` - Total gross pay
+    - `total_deductions` - Total deductions
+    - `total_net` - Total net pay
+    - `approved_by` - User who approved
+    - `approved_at` - Approval timestamp
+    
+    ### Relationships
+    - `items` - Individual employee pay items
+    - `payslips` - Generated payslips
+  </Tab>
+</Tabs>
+
+---
+
+## Query Best Practices
+
+<Accordion title="Always Use Query Builder">
+  ```php
+  // Good - Explicit query builder
+  Product::query()->where('tenant_id', $tenantId)->get();
+  Order::query()->find($id);
+  
+  // Bad - Implicit query builder
+  Product::where('tenant_id', $tenantId)->get();
+  Order::find($id);
+  ```
+</Accordion>
+
+<Accordion title="Tenant Isolation">
+  ```php
+  // Always filter by tenant_id
+  Product::query()
+      ->where('tenant_id', auth()->user()->tenant_id)
+      ->where('shop_id', $shop->id)
+      ->get();
+  ```
+</Accordion>
+
+<Accordion title="Eager Loading">
+  ```php
+  // Prevent N+1 queries
+  Order::query()
+      ->with([
+          'items.productVariant.product',
+          'customer',
+          'payments',
+      ])
+      ->get();
+  ```
+</Accordion>
+
+<Accordion title="Soft Deletes">
+  ```php
+  // Include soft deleted records
+  Product::query()->withTrashed()->get();
+  
+  // Only soft deleted records
+  Product::query()->onlyTrashed()->get();
+  
+  // Restore soft deleted record
+  $product->restore();
+  ```
+</Accordion>

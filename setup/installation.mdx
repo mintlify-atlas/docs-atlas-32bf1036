@@ -1,0 +1,592 @@
+---
+title: "Installation"
+description: "Complete installation guide for ShelfWise inventory management system"
+---
+
+This guide covers installing ShelfWise for both development and production environments.
+
+## System Requirements
+
+### Server Requirements
+
+- **PHP**: 8.2 or higher
+- **Database**: SQLite, MySQL 8.0+, or PostgreSQL 13+
+- **Web Server**: Apache, Nginx, or Laravel built-in server (dev only)
+- **Memory**: Minimum 512MB RAM (2GB+ recommended for production)
+
+### PHP Extensions
+
+The following PHP extensions are required:
+
+- BCMath
+- Ctype
+- cURL
+- DOM
+- Fileinfo
+- JSON
+- Mbstring
+- OpenSSL
+- PCRE
+- PDO (with driver for your database)
+- Tokenizer
+- XML
+- GD or Imagick (for PDF generation)
+
+### Frontend Requirements
+
+- **Node.js**: 18+ (20 LTS recommended)
+- **npm**: 9+ or compatible package manager
+
+<Note>
+  ShelfWise uses **Vite 7** for frontend builds and requires a modern Node.js version.
+</Note>
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="Development">
+    ### Development Installation
+
+    <Steps>
+      <Step title="Clone the repository">
+        ```bash
+        git clone https://github.com/your-org/shelfwise.git
+        cd shelfwise
+        ```
+      </Step>
+
+      <Step title="Install Composer dependencies">
+        ```bash
+        composer install
+        ```
+
+        Key packages installed:
+        - `laravel/framework` (^12.0) - Core Laravel framework
+        - `inertiajs/inertia-laravel` (^2.0) - Server-side Inertia adapter
+        - `laravel/fortify` (^1.30) - Authentication scaffolding
+        - `laravel/sanctum` (^4.0) - API token authentication
+        - `barryvdh/laravel-dompdf` (^3.1) - PDF generation
+        - `maatwebsite/excel` (^3.1) - Excel import/export
+      </Step>
+
+      <Step title="Install npm dependencies">
+        ```bash
+        npm install
+        ```
+
+        Frontend stack:
+        - React 19 with TypeScript
+        - TailwindCSS 4 with @tailwindcss/vite
+        - Inertia.js React adapter
+        - Radix UI components
+        - ApexCharts for analytics
+        - Lucide React icons
+      </Step>
+
+      <Step title="Configure environment">
+        ```bash
+        cp .env.example .env
+        php artisan key:generate
+        ```
+
+        The `.env` file contains default settings for local development:
+
+        ```bash .env
+        APP_NAME=ShelfWise
+        APP_ENV=local
+        APP_DEBUG=true
+        APP_URL=http://localhost:8000
+
+        DB_CONNECTION=sqlite
+
+        QUEUE_CONNECTION=database
+        CACHE_STORE=database
+        SESSION_DRIVER=database
+
+        MAIL_MAILER=log
+        ```
+      </Step>
+
+      <Step title="Create SQLite database">
+        ```bash
+        touch database/database.sqlite
+        ```
+      </Step>
+
+      <Step title="Run migrations">
+        ```bash
+        php artisan migrate
+        ```
+
+        This creates all necessary tables including:
+        - `tenants` - Multi-tenant organization data
+        - `users` - Staff members (tenant-scoped)
+        - `shops` - Store locations
+        - `products` and `product_variants` - Inventory items
+        - `orders`, `order_items`, `order_payments` - Sales data
+        - `stock_movements` - Inventory audit trail
+        - `customers` - E-commerce customer data
+        - `payslips`, `pay_runs` - Payroll data
+      </Step>
+
+      <Step title="Start development servers">
+        ```bash
+        composer dev
+        ```
+
+        This runs three concurrent processes:
+        1. `php artisan serve` - Laravel server on port 8000
+        2. `php artisan queue:listen` - Background job processor
+        3. `npm run dev` - Vite HMR server on port 5173
+
+        <Info>
+          Access the application at **http://localhost:8000**
+        </Info>
+      </Step>
+    </Steps>
+
+    ### Optional: Seed Sample Data
+
+    For testing with demo data:
+
+    ```bash
+    php artisan db:seed
+    ```
+
+    <Warning>
+      Seeders are for development only. Never run seeders in production.
+    </Warning>
+  </Tab>
+
+  <Tab title="Production">
+    ### Production Installation
+
+    <Steps>
+      <Step title="Clone or deploy code">
+        ```bash
+        git clone https://github.com/your-org/shelfwise.git /var/www/shelfwise
+        cd /var/www/shelfwise
+        ```
+      </Step>
+
+      <Step title="Install dependencies (production mode)">
+        ```bash
+        composer install --optimize-autoloader --no-dev
+        npm ci
+        ```
+      </Step>
+
+      <Step title="Build frontend assets">
+        ```bash
+        npm run build
+        ```
+
+        For SSR (server-side rendering):
+        ```bash
+        npm run build:ssr
+        ```
+
+        <Info>
+          SSR improves initial page load and SEO. Requires running `php artisan inertia:start-ssr` as a background service.
+        </Info>
+      </Step>
+
+      <Step title="Configure environment">
+        ```bash
+        cp .env.example .env
+        nano .env
+        ```
+
+        Update critical production settings:
+
+        ```bash .env
+        APP_ENV=production
+        APP_DEBUG=false
+        APP_URL=https://yourdomain.com
+
+        DB_CONNECTION=mysql
+        DB_HOST=127.0.0.1
+        DB_PORT=3306
+        DB_DATABASE=shelfwise
+        DB_USERNAME=shelfwise_user
+        DB_PASSWORD=secure_password_here
+
+        QUEUE_CONNECTION=redis
+        CACHE_STORE=redis
+        SESSION_DRIVER=redis
+
+        REDIS_HOST=127.0.0.1
+        REDIS_PASSWORD=null
+        REDIS_PORT=6379
+
+        MAIL_MAILER=smtp
+        MAIL_HOST=smtp.mailtrap.io
+        MAIL_PORT=2525
+        MAIL_USERNAME=your_username
+        MAIL_PASSWORD=your_password
+        MAIL_FROM_ADDRESS=noreply@yourdomain.com
+        ```
+      </Step>
+
+      <Step title="Generate application key">
+        ```bash
+        php artisan key:generate
+        ```
+      </Step>
+
+      <Step title="Run migrations">
+        ```bash
+        php artisan migrate --force
+        ```
+
+        <Warning>
+          The `--force` flag is required in production. Ensure you have database backups before running migrations.
+        </Warning>
+      </Step>
+
+      <Step title="Optimize application">
+        ```bash
+        php artisan config:cache
+        php artisan route:cache
+        php artisan view:cache
+        ```
+      </Step>
+
+      <Step title="Set permissions">
+        ```bash
+        sudo chown -R www-data:www-data /var/www/shelfwise
+        sudo chmod -R 755 /var/www/shelfwise
+        sudo chmod -R 775 /var/www/shelfwise/storage
+        sudo chmod -R 775 /var/www/shelfwise/bootstrap/cache
+        ```
+      </Step>
+
+      <Step title="Configure web server">
+        See [Web Server Configuration](#web-server-configuration) below.
+      </Step>
+
+      <Step title="Set up queue worker">
+        Create a supervisor configuration at `/etc/supervisor/conf.d/shelfwise-worker.conf`:
+
+        ```ini
+        [program:shelfwise-worker]
+        process_name=%(program_name)s_%(process_num)02d
+        command=php /var/www/shelfwise/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+        autostart=true
+        autorestart=true
+        stopasgroup=true
+        killasgroup=true
+        user=www-data
+        numprocs=2
+        redirect_stderr=true
+        stdout_logfile=/var/www/shelfwise/storage/logs/worker.log
+        stopwaitsecs=3600
+        ```
+
+        Start the worker:
+        ```bash
+        sudo supervisorctl reread
+        sudo supervisorctl update
+        sudo supervisorctl start shelfwise-worker:*
+        ```
+      </Step>
+    </Steps>
+
+    ### Schedule Task Runner
+
+    Add to crontab:
+
+    ```bash
+    crontab -e
+    ```
+
+    Add this line:
+
+    ```
+    * * * * * cd /var/www/shelfwise && php artisan schedule:run >> /dev/null 2>&1
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ### Docker Installation (Coming Soon)
+
+    Docker support is planned for a future release. For now, use Laravel Sail for local Docker development:
+
+    ```bash
+    composer require laravel/sail --dev
+    php artisan sail:install
+    ./vendor/bin/sail up
+    ```
+
+    <Note>
+      Sail is included in `require-dev` dependencies. It provides a Docker-based development environment.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Database Configuration
+
+<Accordion title="SQLite (Development)">
+  Default for local development. Already configured in `.env.example`:
+
+  ```bash .env
+  DB_CONNECTION=sqlite
+  ```
+
+  Create the database file:
+  ```bash
+  touch database/database.sqlite
+  ```
+
+  **Pros**: Zero configuration, great for local dev
+  **Cons**: Not suitable for production, no concurrent writes
+</Accordion>
+
+<Accordion title="MySQL">
+  Recommended for production.
+
+  1. Create database and user:
+
+  ```sql
+  CREATE DATABASE shelfwise CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  CREATE USER 'shelfwise_user'@'localhost' IDENTIFIED BY 'secure_password';
+  GRANT ALL PRIVILEGES ON shelfwise.* TO 'shelfwise_user'@'localhost';
+  FLUSH PRIVILEGES;
+  ```
+
+  2. Update `.env`:
+
+  ```bash .env
+  DB_CONNECTION=mysql
+  DB_HOST=127.0.0.1
+  DB_PORT=3306
+  DB_DATABASE=shelfwise
+  DB_USERNAME=shelfwise_user
+  DB_PASSWORD=secure_password
+  ```
+
+  3. Run migrations:
+  ```bash
+  php artisan migrate
+  ```
+</Accordion>
+
+<Accordion title="PostgreSQL">
+  Alternative to MySQL.
+
+  1. Create database and user:
+
+  ```bash
+  sudo -u postgres psql
+  ```
+
+  ```sql
+  CREATE DATABASE shelfwise;
+  CREATE USER shelfwise_user WITH ENCRYPTED PASSWORD 'secure_password';
+  GRANT ALL PRIVILEGES ON DATABASE shelfwise TO shelfwise_user;
+  ```
+
+  2. Update `.env`:
+
+  ```bash .env
+  DB_CONNECTION=pgsql
+  DB_HOST=127.0.0.1
+  DB_PORT=5432
+  DB_DATABASE=shelfwise
+  DB_USERNAME=shelfwise_user
+  DB_PASSWORD=secure_password
+  ```
+</Accordion>
+
+## Web Server Configuration
+
+<CodeGroup>
+```nginx Nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name yourdomain.com;
+    root /var/www/shelfwise/public;
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+
+    index index.php;
+
+    charset utf-8;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+}
+```
+
+```apache Apache
+<VirtualHost *:80>
+    ServerName yourdomain.com
+    DocumentRoot /var/www/shelfwise/public
+
+    <Directory /var/www/shelfwise/public>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/shelfwise_error.log
+    CustomLog ${APACHE_LOG_DIR}/shelfwise_access.log combined
+</VirtualHost>
+```
+</CodeGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="500 Error: Storage not writable">
+    Ensure storage and bootstrap/cache directories are writable:
+
+    ```bash
+    sudo chmod -R 775 storage bootstrap/cache
+    sudo chown -R www-data:www-data storage bootstrap/cache
+    ```
+  </Accordion>
+
+  <Accordion title="npm install fails">
+    Clear npm cache and retry:
+
+    ```bash
+    npm cache clean --force
+    rm -rf node_modules package-lock.json
+    npm install
+    ```
+
+    If using Node 20+, ensure you have compatible versions.
+  </Accordion>
+
+  <Accordion title="Migration fails with 'table already exists'">
+    Reset the database (development only):
+
+    ```bash
+    php artisan migrate:fresh
+    ```
+
+    <Warning>
+      This will delete all data. Never use in production.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Vite not connecting in development">
+    Ensure Vite dev server is running:
+
+    ```bash
+    npm run dev
+    ```
+
+    Check that `VITE_APP_NAME` is set in `.env`.
+  </Accordion>
+
+  <Accordion title="Queue jobs not processing">
+    Start the queue worker:
+
+    ```bash
+    php artisan queue:listen
+    ```
+
+    Or use the combined dev command:
+    ```bash
+    composer dev
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Verifying Installation
+
+Run these checks to ensure everything is working:
+
+<Steps>
+  <Step title="Check PHP version">
+    ```bash
+    php -v
+    # Should show PHP 8.2 or higher
+    ```
+  </Step>
+
+  <Step title="Check required extensions">
+    ```bash
+    php -m | grep -E "pdo|mbstring|openssl|tokenizer|xml|ctype|json"
+    ```
+  </Step>
+
+  <Step title="Test database connection">
+    ```bash
+    php artisan tinker
+    ```
+
+    In Tinker:
+    ```php
+    DB::connection()->getPdo();
+    // Should not throw an error
+    ```
+  </Step>
+
+  <Step title="Verify frontend build">
+    ```bash
+    npm run build
+    # Should complete without errors
+    ```
+  </Step>
+
+  <Step title="Run tests">
+    ```bash
+    php artisan test
+    ```
+  </Step>
+</Steps>
+
+<Info>
+  **Installation successful?** Continue to [Configuration](/setup/configuration) to set up mail, queues, and other services.
+</Info>
+
+## Updating ShelfWise
+
+To update to the latest version:
+
+```bash
+# Pull latest code
+git pull origin main
+
+# Update dependencies
+composer install
+npm install
+
+# Rebuild frontend
+npm run build
+
+# Run new migrations
+php artisan migrate
+
+# Clear and recache
+php artisan config:cache
+php artisan route:cache
+php artisan view:cache
+
+# Restart queue workers
+php artisan queue:restart
+```
+
+<Warning>
+  Always backup your database before updating in production.
+</Warning>

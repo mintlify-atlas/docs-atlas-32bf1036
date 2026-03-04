@@ -1,0 +1,220 @@
+---
+title: Supplier Management
+description: Connect with suppliers, manage business relationships, and configure supplier-specific settings in ShelfWise
+---
+
+## Overview
+
+ShelfWise enables B2B supplier relationships through a connection-based system. Tenants can enable supplier mode to offer products to other businesses, while buyer tenants can request connections to place orders.
+
+## Enabling Supplier Mode
+
+Before accepting connections, a tenant must enable supplier mode with business details:
+
+```php
+use App\Services\SupplierService;
+
+$supplierService->enableSupplierMode($tenant, [
+    'business_registration' => 'REG-123456',
+    'tax_id' => 'TAX-789',
+    'payment_terms' => 'Net 30',
+    'lead_time_days' => 7,
+    'minimum_order_value' => 500.00,
+    'connection_approval_mode' => 'manual', // or 'auto'
+    'settings' => []
+]);
+```
+
+<Note>
+The `connection_approval_mode` determines whether buyer connection requests are automatically approved or require manual review.
+</Note>
+
+## Connection Lifecycle
+
+Supplier connections follow a state-based workflow managed through the `SupplierConnection` model.
+
+### Connection States
+
+| Status | Description | Can Order |
+|--------|-------------|----------|
+| `PENDING` | Connection requested, awaiting approval | No |
+| `APPROVED` | Approved by supplier | Yes |
+| `ACTIVE` | Actively ordering | Yes |
+| `SUSPENDED` | Temporarily suspended | No |
+| `REJECTED` | Connection request denied | No |
+
+<Accordion title="Connection Status Methods">
+```php
+// Check if orders are allowed
+$connection->status->canOrder(); // true for APPROVED/ACTIVE
+
+// Check state transitions
+$connection->status->canApprove(); // only from PENDING
+$connection->status->canSuspend(); // from APPROVED/ACTIVE
+$connection->status->canActivate(); // from APPROVED/SUSPENDED
+```
+
+See: `app/Enums/ConnectionStatus.php:13`
+</Accordion>
+
+### Requesting a Connection
+
+Buyer tenants initiate connections:
+
+<Steps>
+  <Step title="Buyer submits connection request">
+    ```php
+    use App\Services\SupplierConnectionService;
+    
+    $connectionService->requestConnection(
+        $buyerTenant,
+        $supplierTenant,
+        ['buyer_notes' => 'Looking to purchase inventory monthly']
+    );
+    ```
+  </Step>
+  
+  <Step title="Automatic approval (if enabled)">
+    If the supplier has `connection_approval_mode` set to auto-approve, the connection is immediately approved:
+    
+    ```php
+    if ($supplierProfile->canAutoApproveConnections()) {
+        $this->approveConnection($connection, null);
+    }
+    ```
+    
+    See: `app/Services/SupplierConnectionService.php:32`
+  </Step>
+  
+  <Step title="Manual approval workflow">
+    For manual approval, authorized supplier users review pending requests:
+    
+    ```php
+    // Supplier approves the connection
+    $connectionService->approveConnection($connection, $approverUser);
+    
+    // Or rejects it
+    $connectionService->rejectConnection($connection);
+    ```
+  </Step>
+</Steps>
+
+### Managing Active Connections
+
+<Accordion title="Suspend a connection">
+```php
+$connectionService->suspendConnection(
+    $connection,
+    'Payment overdue - suspending until resolved'
+);
+```
+
+This prevents the buyer from placing new orders. See: `app/Services/SupplierConnectionService.php:82`
+</Accordion>
+
+<Accordion title="Reactivate a suspended connection">
+```php
+$connectionService->activateConnection($connection);
+```
+
+Restores ordering capability. See: `app/Services/SupplierConnectionService.php:100`
+</Accordion>
+
+<Accordion title="Update connection terms">
+```php
+$connectionService->updateConnectionTerms($connection, [
+    'credit_limit' => 10000.00,
+    'payment_terms_override' => 'Net 45',
+    'supplier_notes' => 'Approved credit extension'
+]);
+```
+
+Customize payment terms or credit limits for specific buyers. See: `app/Services/SupplierConnectionService.php:113`
+</Accordion>
+
+## Credit Limit Management
+
+Suppliers can set credit limits per connection to control outstanding balances:
+
+```php
+use App\Models\SupplierConnection;
+
+$connection->update([
+    'credit_limit' => 25000.00
+]);
+```
+
+<Warning>
+When a buyer creates a purchase order, the system calculates outstanding amounts across all unpaid POs:
+
+```php
+$outstandingAmount = $this->calculateOutstandingAmount(
+    $buyerTenantId,
+    $supplierTenantId,
+    $excludeCurrentPoId
+);
+
+if ($newTotalOutstanding > $connection->credit_limit) {
+    throw new \Exception('Adding this item would exceed your credit limit');
+}
+```
+
+See: `app/Services/PurchaseOrderService.php:86`
+</Warning>
+
+## Retrieving Connections
+
+### For Suppliers
+
+```php
+// All connections
+$connections = $connectionService->getConnectionsForSupplier($supplierTenant);
+
+// Filter by status
+$pending = $connectionService->getConnectionsForSupplier(
+    $supplierTenant,
+    ConnectionStatus::PENDING
+);
+```
+
+### For Buyers
+
+```php
+$connections = $connectionService->getConnectionsForBuyer($buyerTenant);
+
+// Check if ordering is allowed
+$canOrder = $connectionService->canOrder($buyerTenant, $supplierTenant);
+```
+
+See: `app/Services/SupplierConnectionService.php:130`
+
+## Authorization
+
+Connection management uses policy-based authorization:
+
+```php
+// In controller
+Gate::authorize('approve', $connection);
+Gate::authorize('suspend', $connection);
+Gate::authorize('activate', $connection);
+```
+
+See: `app/Http/Controllers/SupplierConnectionController.php:74`
+
+## Multi-Tenancy Considerations
+
+<Note>
+Supplier connections are intentionally **cross-tenant** relationships. Unlike typical ShelfWise models that filter by `tenant_id`, connections link two different tenants:
+
+- `supplier_tenant_id` - The supplier's tenant
+- `buyer_tenant_id` - The buyer's tenant
+
+Query scopes ensure proper isolation:
+
+```php
+SupplierConnection::forSupplier($tenantId)->get();
+SupplierConnection::forBuyer($tenantId)->get();
+```
+
+See: `app/Models/SupplierConnection.php:91`
+</Note>

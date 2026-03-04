@@ -1,0 +1,392 @@
+---
+title: Customer Management
+description: Manage e-commerce customers, accounts, credit limits, and purchase history in ShelfWise
+---
+
+## Overview
+
+Customers in ShelfWise are **separate from staff users**. They are e-commerce buyers who register through the storefront and can place orders, manage their profiles, and track order history.
+
+<Warning>
+  Customers are NOT the same as Users (staff members). They use a separate authentication guard (`auth:customer`) and have their own database table.
+</Warning>
+
+## Customer Model
+
+The Customer model extends Laravel's `Authenticatable` class and implements email verification:
+
+```php
+// app/Models/Customer.php:14
+class Customer extends Authenticatable implements MustVerifyEmail
+{
+    use BelongsToTenant, HasFactory, Notifiable, SoftDeletes;
+}
+```
+
+### Key Customer Attributes
+
+<ParamField path="tenant_id" type="integer" required>
+  The tenant that owns this customer
+</ParamField>
+
+<ParamField path="preferred_shop_id" type="integer">
+  Customer's preferred shop for browsing and checkout
+</ParamField>
+
+<ParamField path="first_name" type="string" required>
+  Customer's first name
+</ParamField>
+
+<ParamField path="last_name" type="string" required>
+  Customer's last name
+</ParamField>
+
+<ParamField path="email" type="string" required>
+  Customer's email address (must be unique per tenant)
+</ParamField>
+
+<ParamField path="phone" type="string">
+  Customer's phone number
+</ParamField>
+
+<ParamField path="password" type="string" required>
+  Hashed password for customer authentication
+</ParamField>
+
+<ParamField path="is_active" type="boolean" default="true">
+  Whether the customer account is active
+</ParamField>
+
+<ParamField path="marketing_opt_in" type="boolean" default="false">
+  Whether customer has opted in to marketing emails
+</ParamField>
+
+<ParamField path="account_balance" type="decimal">
+  Current credit balance (for customers with credit accounts)
+</ParamField>
+
+<ParamField path="credit_limit" type="decimal">
+  Maximum credit allowed for this customer
+</ParamField>
+
+<ParamField path="total_purchases" type="decimal">
+  Lifetime total of all purchases
+</ParamField>
+
+<ParamField path="last_purchase_at" type="datetime">
+  Timestamp of the customer's most recent purchase
+</ParamField>
+
+## Creating Customers
+
+Use the `CustomerService` to create new customers with proper validation and tenant isolation:
+
+```php
+// app/Services/CustomerService.php:94-135
+use App\Services\CustomerService;
+
+$customerService = app(CustomerService::class);
+
+$customer = $customerService->create([
+    'first_name' => 'John',
+    'last_name' => 'Doe',
+    'email' => 'john.doe@example.com',
+    'phone' => '+234 800 123 4567',
+    'password' => 'securepassword123',
+    'preferred_shop_id' => 1,
+    'is_active' => true,
+    'marketing_opt_in' => false,
+    'credit_limit' => 50000.00,
+    'address' => [
+        'street' => '123 Main Street',
+        'city' => 'Lagos',
+        'state' => 'Lagos',
+        'postal_code' => '100001',
+        'country' => 'Nigeria',
+    ],
+], $tenant);
+```
+
+<Note>
+  The `create()` method automatically hashes the password, sets initial balances, and creates the customer's primary address if provided.
+</Note>
+
+## Listing Customers
+
+The `CustomerService::list()` method provides powerful filtering options:
+
+```php
+// app/Services/CustomerService.php:22-69
+$customers = $customerService->list($tenant, $requester, [
+    'search' => 'john',              // Search by name, email, or phone
+    'status' => 'active',            // Filter by active/inactive
+    'has_credit' => 'yes',           // Filter customers with credit limits
+    'shop_id' => 1,                  // Filter by preferred shop
+    'sort' => 'created_at',          // Sort field
+    'direction' => 'desc',           // Sort direction
+    'per_page' => 15,                // Pagination size
+]);
+```
+
+### Available Sort Fields
+
+- `first_name`
+- `last_name`
+- `email`
+- `created_at`
+- `account_balance`
+- `total_purchases`
+
+## Updating Customers
+
+```php
+// app/Services/CustomerService.php:142-184
+$customer = Customer::query()->find($customerId);
+
+$updatedCustomer = $customerService->update($customer, [
+    'first_name' => 'Jane',
+    'email' => 'jane.doe@example.com',
+    'phone' => '+234 800 987 6543',
+    'is_active' => true,
+    'credit_limit' => 75000.00,
+    'address' => [
+        'street' => '456 New Street',
+        'city' => 'Abuja',
+        'state' => 'FCT',
+        'postal_code' => '900001',
+    ],
+]);
+```
+
+## Customer Credit Management
+
+Customers can have credit accounts with configurable limits:
+
+### Setting Credit Limits
+
+```php
+// app/Services/CustomerService.php:254-268
+$customer = $customerService->setCreditLimit($customer, 100000.00);
+```
+
+### Checking Available Credit
+
+```php
+// app/Models/Customer.php:196-203
+$availableCredit = $customer->availableCredit();
+// Returns: credit_limit - account_balance
+```
+
+### Validating Credit Purchases
+
+```php
+// app/Models/Customer.php:208-215
+if ($customer->canPurchaseOnCredit(5000.00)) {
+    // Process credit purchase
+}
+```
+
+<Warning>
+  Always validate credit availability before allowing purchases on credit to prevent customers from exceeding their limits.
+</Warning>
+
+## Credit Transactions
+
+All credit changes are tracked using `CustomerCreditTransaction`:
+
+```php
+// app/Models/CustomerCreditTransaction.php:15-28
+CustomerCreditTransaction::create([
+    'customer_id' => $customer->id,
+    'order_id' => $order->id,
+    'tenant_id' => $tenant->id,
+    'shop_id' => $shop->id,
+    'type' => 'purchase',              // or 'payment', 'adjustment'
+    'amount' => 5000.00,
+    'balance_before' => $customer->account_balance,
+    'balance_after' => $customer->account_balance + 5000.00,
+    'description' => 'Purchase on credit',
+    'reference_number' => $order->order_number,
+    'recorded_by' => auth()->id(),
+]);
+```
+
+### Transaction Fields
+
+<Accordion title="Credit Transaction Schema">
+  <ParamField path="type" type="string" required>
+    Transaction type: `purchase`, `payment`, `adjustment`, `refund`
+  </ParamField>
+  
+  <ParamField path="amount" type="decimal" required>
+    Transaction amount (positive for charges, negative for credits)
+  </ParamField>
+  
+  <ParamField path="balance_before" type="decimal" required>
+    Customer's account balance before this transaction
+  </ParamField>
+  
+  <ParamField path="balance_after" type="decimal" required>
+    Customer's account balance after this transaction
+  </ParamField>
+  
+  <ParamField path="description" type="string">
+    Human-readable description of the transaction
+  </ParamField>
+  
+  <ParamField path="reference_number" type="string">
+    External reference (order number, payment reference, etc.)
+  </ParamField>
+  
+  <ParamField path="recorded_by" type="integer">
+    User ID of the staff member who recorded this transaction
+  </ParamField>
+</Accordion>
+
+## Customer Statistics
+
+Get aggregate statistics for all customers in a tenant:
+
+```php
+// app/Services/CustomerService.php:211-233
+$stats = $customerService->getStatistics($tenant);
+
+// Returns:
+[
+    'total_customers' => 1250,
+    'active_customers' => 1100,
+    'customers_with_credit' => 85,
+    'total_credit_balance' => '125000.00',
+    'new_this_month' => 42,
+]
+```
+
+## Customer Authentication
+
+Customers authenticate through the storefront using a separate guard:
+
+```php
+// routes/storefront.php:33-49
+Route::middleware('guest:customer')->group(function () {
+    Route::get('/login', [CustomerAuthController::class, 'showLogin']);
+    Route::post('/login', [CustomerAuthController::class, 'login'])
+        ->middleware('throttle:5,1');
+    
+    Route::get('/register', [CustomerAuthController::class, 'showRegister']);
+    Route::post('/register', [CustomerAuthController::class, 'register'])
+        ->middleware('throttle:3,1');
+});
+
+Route::middleware('auth:customer')->group(function () {
+    Route::post('/logout', [CustomerAuthController::class, 'logout']);
+    Route::get('/checkout', [CheckoutController::class, 'index']);
+});
+```
+
+<Note>
+  Customer authentication is completely separate from staff authentication. Use `auth('customer')` to access the current customer.
+</Note>
+
+## Customer Relationships
+
+### Orders
+
+```php
+// app/Models/Customer.php:96-99
+$customer->orders; // All orders
+$customer->orders()->latest()->limit(5)->get(); // Recent 5 orders
+```
+
+### Addresses
+
+```php
+// app/Models/Customer.php:88-91
+$customer->addresses; // All saved addresses
+$customer->addresses()->where('is_default', true)->first(); // Default address
+```
+
+### Preferred Shop
+
+```php
+// app/Models/Customer.php:80-83
+$customer->preferredShop; // BelongsTo relationship
+```
+
+### Carts
+
+```php
+// app/Models/Customer.php:104-107
+$customer->carts; // All carts (typically one active cart per shop)
+```
+
+## Query Scopes
+
+### Active Customers
+
+```php
+// app/Models/Customer.php:112-115
+$activeCustomers = Customer::query()
+    ->where('tenant_id', $tenant->id)
+    ->active()
+    ->get();
+```
+
+### Customers for Specific Shop
+
+```php
+// app/Models/Customer.php:131-142
+$shopCustomers = Customer::query()
+    ->where('tenant_id', $tenant->id)
+    ->forShop($shopId)
+    ->get();
+```
+
+<Note>
+  The `forShop()` scope includes customers whose preferred shop matches OR who have placed at least one order at that shop.
+</Note>
+
+## Quick Customer Generation
+
+For rapid testing or POS scenarios, generate placeholder customer data:
+
+```php
+// app/Services/CustomerService.php:273-294
+$quickData = $customerService->generateQuickCustomerData($tenant);
+
+// Returns:
+[
+    'first_name' => 'Customer',
+    'last_name' => 'ABC123',
+    'email' => 'customer_1234567890@tenant-slug.local',
+    'phone' => '',
+    'password' => 'password',
+    'address' => [...],
+    'is_active' => true,
+    'marketing_opt_in' => false,
+    'credit_limit' => null,
+]
+```
+
+## Email Verification
+
+```php
+// app/Models/Customer.php:170-183
+if (!$customer->hasVerifiedEmail()) {
+    $customer->sendEmailVerificationNotification();
+}
+
+$customer->markEmailAsVerified();
+```
+
+## Unpaid Orders
+
+```php
+// app/Models/Customer.php:220-225
+$unpaidOrders = $customer->unpaidOrders()->get();
+```
+
+## Related Resources
+
+- [Storefront Configuration](/features/ecommerce/storefront)
+- [Payment Integration](/features/ecommerce/payments)
+- [Order Management](/features/sales/orders)

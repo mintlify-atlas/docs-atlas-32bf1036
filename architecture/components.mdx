@@ -1,0 +1,522 @@
+---
+title: "Component Library"
+description: "Explore ShelfWise's comprehensive React component library built with TypeScript and Tailwind CSS"
+---
+
+## Overview
+
+ShelfWise uses a modular component library organized by functionality. All components are built with TypeScript, support dark mode, and follow the TailAdmin design system.
+
+## Component Organization
+
+Components are organized in `resources/js/components/` by domain:
+
+```
+components/
+├── ui/              # Generic UI components (buttons, cards, badges)
+├── form/            # Form inputs and controls
+├── header/          # Header and navigation components
+├── dashboard/       # Dashboard-specific components
+├── products/        # Product management components
+├── orders/          # Order management components
+├── stock/           # Inventory components
+├── payment/         # Payment gateway components
+└── error/           # Error boundaries and fallbacks
+```
+
+## UI Components
+
+### Button
+
+Primary action component with multiple variants:
+
+```typescript
+import Button from '@/components/ui/button/Button';
+
+<Button 
+    variant="primary"  // primary | outline | ghost | danger
+    size="md"          // sm | md | lg
+    onClick={handleClick}
+    disabled={loading}
+>
+    <Plus className="mr-2 h-4 w-4" />
+    Create Product
+</Button>
+```
+
+<Tabs>
+  <Tab title="Variants">
+    ```tsx
+    <Button variant="primary">Primary Action</Button>
+    <Button variant="outline">Secondary Action</Button>
+    <Button variant="ghost">Tertiary Action</Button>
+    <Button variant="danger">Delete Item</Button>
+    ```
+  </Tab>
+  
+  <Tab title="With Icons">
+    ```tsx
+    import { Save, Trash2, Plus } from 'lucide-react';
+
+    <Button>
+        <Save className="mr-2 h-4 w-4" />
+        Save Changes
+    </Button>
+
+    <Button variant="danger">
+        <Trash2 className="mr-2 h-4 w-4" />
+        Delete
+    </Button>
+    ```
+  </Tab>
+  
+  <Tab title="Loading State">
+    ```tsx
+    const { processing } = useForm();
+
+    <Button disabled={processing}>
+        {processing ? 'Saving...' : 'Save'}
+    </Button>
+    ```
+  </Tab>
+</Tabs>
+
+### Card
+
+Container component for grouping related content:
+
+```typescript
+import Card from '@/components/ui/card/Card';
+
+<Card
+    title="Product Details"
+    description="Manage your product information"
+    className="p-6"
+>
+    <div className="space-y-4">
+        {/* Card content */}
+    </div>
+</Card>
+```
+
+**Card Variants:**
+
+<Tabs>
+  <Tab title="Basic Card">
+    ```tsx
+    <Card title="Sales Overview">
+        <p className="text-2xl font-bold">₦125,000</p>
+        <p className="text-sm text-gray-500">This month</p>
+    </Card>
+    ```
+  </Tab>
+  
+  <Tab title="Card with Image">
+    ```tsx
+    <Card
+        title={product.name}
+        description={product.description}
+        image={product.images[0]?.url}
+    >
+        <Button>View Details</Button>
+    </Card>
+    ```
+  </Tab>
+  
+  <Tab title="Link Card">
+    ```tsx
+    import LinkCard from '@/components/ui/card/LinkCard';
+
+    <LinkCard
+        href="/products/create"
+        title="Create Product"
+        description="Add a new product to your inventory"
+        icon={<Package />}
+    />
+    ```
+  </Tab>
+</Tabs>
+
+### Badge
+
+Status indicators with semantic colors:
+
+```typescript
+import Badge from '@/components/ui/badge/Badge';
+import { getOrderStatusColor } from '@/lib/status-configs';
+
+<Badge
+    variant="light"    // light | solid
+    color={getOrderStatusColor(order.status)}
+    size="md"          // sm | md
+>
+    {order.status}
+</Badge>
+```
+
+**Available Colors:**
+
+- `primary` / `brand` - Primary brand color
+- `success` - Green for success states
+- `error` - Red for errors/warnings
+- `warning` - Orange for warnings
+- `info` - Blue for informational states
+- `gray` - Neutral gray
+- `light` - Light gray
+- `dark` - Dark gray
+
+<Note>
+**Best Practice**: Always use status config functions from `@/lib/status-configs` to get badge colors. This ensures consistency across the application.
+</Note>
+
+### Modal
+
+Overlay dialogs for focused interactions:
+
+```typescript
+import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
+import { useState } from 'react';
+
+const [isOpen, setIsOpen] = useState(false);
+
+<Modal isOpen={isOpen} onClose={() => setIsOpen(false)}>
+    <ModalHeader>
+        <h3>Confirm Action</h3>
+    </ModalHeader>
+    
+    <ModalBody>
+        <p>Are you sure you want to delete this product?</p>
+    </ModalBody>
+    
+    <ModalFooter>
+        <Button variant="outline" onClick={() => setIsOpen(false)}>
+            Cancel
+        </Button>
+        <Button variant="danger" onClick={handleDelete}>
+            Delete
+        </Button>
+    </ModalFooter>
+</Modal>
+```
+
+### Empty State
+
+Placeholder for empty data views:
+
+```typescript
+import EmptyState from '@/components/ui/EmptyState';
+import { Package, Plus } from 'lucide-react';
+
+<EmptyState
+    icon={<Package className="h-12 w-12" />}
+    title="No products found"
+    description="Get started by creating your first product"
+    action={
+        <Link href="/products/create">
+            <Button>
+                <Plus className="mr-2 h-4 w-4" />
+                Create Product
+            </Button>
+        </Link>
+    }
+/>
+```
+
+## Form Components
+
+### Input Field
+
+Standard text input with label and error handling:
+
+```typescript
+import Input from '@/components/form/input/InputField';
+import Label from '@/components/form/Label';
+import InputError from '@/components/form/InputError';
+
+const { data, setData, errors } = useForm();
+
+<div>
+    <Label htmlFor="name">Product Name</Label>
+    <Input
+        id="name"
+        name="name"
+        type="text"
+        value={data.name}
+        onChange={(e) => setData('name', e.target.value)}
+        placeholder="Enter product name"
+        required
+    />
+    {errors.name && <InputError message={errors.name} />}
+</div>
+```
+
+### Select
+
+Dropdown selection with searchable options:
+
+```typescript
+import Select from '@/components/form/Select';
+
+<Select
+    options={[
+        { value: '1', label: 'Option 1' },
+        { value: '2', label: 'Option 2' },
+    ]}
+    value={data.category_id}
+    onChange={(value) => setData('category_id', value)}
+    placeholder="Select a category"
+    searchable
+/>
+```
+
+### Checkbox & Radio
+
+```typescript
+import Checkbox from '@/components/form/input/Checkbox';
+import Radio from '@/components/form/input/Radio';
+
+// Checkbox
+<Checkbox
+    name="is_active"
+    checked={data.is_active}
+    onChange={(e) => setData('is_active', e.target.checked)}
+    label="Active"
+/>
+
+// Radio buttons
+<div className="space-y-2">
+    <Radio
+        name="payment_method"
+        value="cash"
+        checked={data.payment_method === 'cash'}
+        onChange={(e) => setData('payment_method', e.target.value)}
+        label="Cash"
+    />
+    <Radio
+        name="payment_method"
+        value="card"
+        checked={data.payment_method === 'card'}
+        onChange={(e) => setData('payment_method', e.target.value)}
+        label="Credit Card"
+    />
+</div>
+```
+
+### TextArea
+
+Multi-line text input:
+
+```typescript
+import TextArea from '@/components/form/input/TextArea';
+
+<TextArea
+    name="description"
+    value={data.description}
+    onChange={(e) => setData('description', e.target.value)}
+    placeholder="Enter product description"
+    rows={4}
+/>
+```
+
+### Date Picker
+
+Calendar-based date selection:
+
+```typescript
+import DatePicker from '@/components/form/date-picker';
+
+<DatePicker
+    id="start_date"
+    mode="single"              // single | range
+    defaultDate={startDate}
+    placeholder="Select date"
+    onChange={handleDateChange}
+/>
+```
+
+## Domain-Specific Components
+
+### Stock Level Badge
+
+Visual indicator for inventory status:
+
+```typescript
+import StockLevelBadge from '@/components/stock/StockLevelBadge';
+
+<StockLevelBadge
+    availableStock={variant.available_stock}
+    totalStock={variant.total_stock}
+    reorderPoint={variant.reorder_point}
+/>
+```
+
+Displays:
+- **In Stock** (green) - Above reorder point
+- **Low Stock** (orange) - Below reorder point but available
+- **Out of Stock** (red) - Zero available stock
+
+### Payment Gateway Selector
+
+Payment method selection component:
+
+```typescript
+import PaymentGatewaySelector from '@/components/payment/PaymentGatewaySelector';
+
+<PaymentGatewaySelector
+    gateways={[
+        { id: 'paystack', name: 'Paystack', icon: PaystackIcon },
+        { id: 'crypto', name: 'Cryptocurrency', icon: CryptoIcon },
+    ]}
+    selectedGateway={data.gateway}
+    onSelect={(gateway) => setData('gateway', gateway)}
+/>
+```
+
+### Image Uploader
+
+Drag-and-drop image upload with preview:
+
+```typescript
+import ImageUploader from '@/components/images/ImageUploader';
+
+<ImageUploader
+    images={data.images}
+    onUpload={handleImageUpload}
+    onRemove={handleImageRemove}
+    onReorder={handleImageReorder}
+    maxImages={5}
+/>
+```
+
+## Layout Components
+
+### Tabs
+
+Tabbed navigation for content sections:
+
+```typescript
+import { TabList, TabTrigger, TabContent } from '@/components/ui/tabs/Tab';
+import { useState } from 'react';
+
+const [activeTab, setActiveTab] = useState('overview');
+
+<div>
+    <TabList variant="underline">
+        <TabTrigger
+            variant="underline"
+            isActive={activeTab === 'overview'}
+            onClick={() => setActiveTab('overview')}
+        >
+            Overview
+        </TabTrigger>
+        <TabTrigger
+            variant="underline"
+            isActive={activeTab === 'details'}
+            onClick={() => setActiveTab('details')}
+        >
+            Details
+        </TabTrigger>
+    </TabList>
+    
+    <TabContent>
+        {activeTab === 'overview' && <OverviewPanel />}
+        {activeTab === 'details' && <DetailsPanel />}
+    </TabContent>
+</div>
+```
+
+### Pagination
+
+Page navigation for large datasets:
+
+```typescript
+import Pagination from '@/components/ui/pagination/Pagination';
+
+<Pagination
+    currentPage={products.current_page}
+    totalPages={products.last_page}
+    onPageChange={(page) => router.get('/products', { page })}
+/>
+```
+
+## Component Best Practices
+
+<Note>
+1. **Always extract reusable components** - If you use a pattern twice, make it a component
+2. **Use TypeScript interfaces** - Define prop types for type safety
+3. **Support dark mode** - Use Tailwind's `dark:` variants
+4. **Keep components focused** - Single responsibility principle
+5. **Export from index files** - Use barrel exports for cleaner imports
+</Note>
+
+### Example: Creating a Reusable Component
+
+```typescript
+// components/products/ProductCard.tsx
+import { Product } from '@/types/product';
+import Card from '@/components/ui/card/Card';
+import Badge from '@/components/ui/badge/Badge';
+import Button from '@/components/ui/button/Button';
+import { formatCurrency } from '@/lib/formatters';
+import { Link } from '@inertiajs/react';
+
+interface ProductCardProps {
+    product: Product;
+    onEdit?: (product: Product) => void;
+    showActions?: boolean;
+}
+
+export default function ProductCard({ 
+    product, 
+    onEdit, 
+    showActions = true 
+}: ProductCardProps) {
+    const minPrice = Math.min(...product.variants.map(v => v.price));
+    
+    return (
+        <Card
+            title={product.name}
+            description={product.description}
+            image={product.images?.[0]?.url}
+        >
+            <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                    <Badge
+                        variant="light"
+                        color={product.is_active ? 'success' : 'error'}
+                    >
+                        {product.is_active ? 'Active' : 'Inactive'}
+                    </Badge>
+                    <p className="font-semibold">
+                        {formatCurrency(minPrice, product.shop.currency)}
+                    </p>
+                </div>
+                
+                {showActions && (
+                    <div className="flex gap-2">
+                        <Link href={`/products/${product.id}`} className="flex-1">
+                            <Button variant="outline" className="w-full">
+                                View
+                            </Button>
+                        </Link>
+                        {onEdit && (
+                            <Button 
+                                onClick={() => onEdit(product)} 
+                                className="flex-1"
+                            >
+                                Edit
+                            </Button>
+                        )}
+                    </div>
+                )}
+            </div>
+        </Card>
+    );
+}
+```
+
+## See Also
+
+- [Inertia.js + React Setup](/architecture/inertia-react) - Application architecture
+- [State Management](/architecture/state-management) - Single source of truth pattern
+- [Routing with Wayfinder](/architecture/routing) - Type-safe navigation

@@ -1,0 +1,446 @@
+---
+title: Receipts
+description: Generate, print, and email receipts for orders and payments
+---
+
+ShelfWise automatically generates receipts for completed sales and payments. Receipts can be printed, emailed, or downloaded as PDFs.
+
+## Overview
+
+Receipts in ShelfWise:
+
+- Auto-generated for POS sales and completed orders
+- Include order details, line items, taxes, and payment info
+- Support custom branding and shop information
+- Can be emailed to customers
+- Stored as PDFs for archival
+- Unique receipt numbers for tracking
+
+## Receipt Types
+
+ShelfWise generates different receipt types:
+
+| Type | Description | When Generated |
+|------|-------------|----------------|
+| **Sale Receipt** | Full order receipt | When order is delivered/completed |
+| **Payment Receipt** | Payment-only receipt | When payment is recorded |
+| **Refund Receipt** | Refund confirmation | When refund is processed |
+| **Store Credit** | Credit memo | When store credit is issued |
+
+## Receipt Model
+
+Receipts are stored in the database with metadata:
+
+```php
+// Receipt.php:13
+protected $fillable = [
+    'tenant_id',
+    'shop_id',
+    'order_id',
+    'order_payment_id',
+    'customer_id',
+    'receipt_number',
+    'type',
+    'amount',
+    'pdf_path',
+    'generated_at',
+    'emailed_at',
+    'emailed_to',
+    'generated_by',
+];
+```
+
+This allows:
+- Tracking which receipts were emailed and when
+- Associating receipts with orders and payments
+- Regenerating receipts if needed
+- Audit trail of who generated receipts
+
+## Automatic Receipt Generation
+
+Receipts are automatically generated when POS sales are completed:
+
+```php
+// POSController.php:129
+$order = $this->posService->createQuickSale(...);
+$this->receiptService->generateOrderReceipt($order);
+$receiptUrl = route('receipts.orders.view', $order);
+```
+
+The receipt is immediately available for:
+- Printing
+- Emailing
+- Viewing on screen
+- Downloading as PDF
+
+## Receipt Numbers
+
+Each receipt gets a unique number using a date-based format:
+
+```php
+// Receipt.php:65
+public static function generateReceiptNumber(): string
+{
+    $prefix = 'REC';
+    $date = now()->format('Ymd');
+    $lastReceipt = self::where('receipt_number', 'like', "{$prefix}-{$date}-%")
+        ->orderBy('id', 'desc')
+        ->first();
+
+    $sequence = $lastReceipt
+        ? ((int) substr($lastReceipt->receipt_number, -4)) + 1
+        : 1;
+
+    return sprintf('%s-%s-%04d', $prefix, $date, $sequence);
+}
+```
+
+Example: `REC-20240304-0001`
+
+This format:
+- Ensures uniqueness
+- Makes receipts easy to find by date
+- Supports sequential tracking per day
+- Prevents collisions during concurrent sales
+
+## Receipt Contents
+
+A typical receipt includes:
+
+### Header Information
+
+- Shop name and logo
+- Shop address and contact info
+- Receipt number and date
+- Order number
+- Cashier/staff name
+
+### Line Items
+
+For each item sold:
+
+```php
+// Example receipt line item
+$lineItem = [
+    'product_name' => $item->productVariant->product->name,
+    'variant_name' => $item->productVariant->name,
+    'sku' => $item->productVariant->sku,
+    'quantity' => $item->quantity,
+    'unit_price' => $item->unit_price,
+    'discount' => $item->discount_amount,
+    'tax' => $item->tax_amount,
+    'total' => $item->total_amount,
+];
+```
+
+### Totals Section
+
+- Subtotal
+- Discounts
+- Tax (itemized by rate if applicable)
+- Shipping (if applicable)
+- Grand Total
+
+### Payment Information
+
+```php
+// Example payment info
+$paymentInfo = [
+    'method' => $order->payment_method,
+    'amount_paid' => $order->paid_amount,
+    'amount_tendered' => $amountTendered, // For cash
+    'change' => $change, // For cash
+    'reference' => $payment->reference_number,
+];
+```
+
+### Footer Information
+
+- Return policy
+- Thank you message
+- Shop website/social media
+- VAT registration number (if applicable)
+
+## Viewing Receipts
+
+Receipts can be viewed in multiple formats:
+
+### Web View
+
+View receipts in the browser for on-screen display:
+
+```php
+route('receipts.orders.view', $order)
+```
+
+Useful for:
+- Previewing before printing
+- Showing customers on screen
+- Quick reference without printing
+
+### PDF Download
+
+Download receipts as PDF files:
+
+```php
+route('receipts.orders.download', $order)
+```
+
+PDFs are:
+- Printer-friendly formatted
+- Archived in the database
+- Can be emailed as attachments
+
+### Print View
+
+Optimized print layout:
+
+```php
+route('receipts.orders.print', $order)
+```
+
+This opens a print dialog with:
+- Optimized paper size (typically 80mm thermal)
+- Minimal margins
+- Black and white formatting
+
+## Emailing Receipts
+
+Send receipts directly to customers:
+
+```php
+$receiptService->emailReceipt(
+    receipt: $receipt,
+    email: $customer->email,
+    customerName: $customer->full_name
+);
+```
+
+Email features:
+- Attaches PDF receipt
+- Customizable email template
+- Includes order summary in email body
+- Tracks email sent timestamp
+- Records recipient email address
+
+```php
+// Receipt.php after emailing
+$receipt->emailed_at = now();
+$receipt->emailed_to = $customer->email;
+$receipt->save();
+```
+
+## Custom Branding
+
+Receipts support shop-level customization:
+
+- **Logo** - Upload shop logo to appear on receipts
+- **Colors** - Customize header colors
+- **Contact Info** - Shop address, phone, email, website
+- **Return Policy** - Custom return policy text
+- **Footer Message** - Custom thank you message
+
+These settings are configured per shop in Shop Settings.
+
+## Receipt for Cash Payments
+
+Cash payments include additional information:
+
+```php
+// POSService.php:178
+if ($paymentMethod === 'cash' && $amountTendered > 0) {
+    $change = $amountTendered - $totalAmount;
+    $currencySymbol = $shop->currency_symbol ?? '$';
+    $paymentNotes = "Cash tendered: {$currencySymbol}".number_format($amountTendered, 2).
+                    ", Change: {$currencySymbol}".number_format($change, 2);
+
+    $order->update([
+        'internal_notes' => $paymentNotes,
+    ]);
+}
+```
+
+The receipt clearly shows:
+- Amount tendered
+- Change due
+- Formatted with shop's currency symbol
+
+## Thermal Printer Support
+
+ShelfWise receipts are optimized for thermal receipt printers:
+
+### Standard Sizes
+
+- **80mm** - Most common retail size
+- **58mm** - Compact mobile printers
+- **Custom** - Configure custom paper width
+
+### Printer Integration
+
+Connect thermal printers via:
+
+1. **USB** - Direct USB connection to POS terminal
+2. **Network** - WiFi or Ethernet network printers
+3. **Bluetooth** - Mobile POS with Bluetooth printers
+4. **Cloud Print** - Cloud-connected printers
+
+### Print Formatting
+
+Thermal receipts use:
+- Monospace fonts for alignment
+- ASCII art for logos (optional)
+- Barcode printing for order numbers
+- ESC/POS commands for printer control
+
+## Receipt Reprinting
+
+Receipts can be reprinted at any time:
+
+<Steps>
+  <Step title="Find the Order">
+    Navigate to the order in the Orders list.
+  </Step>
+
+  <Step title="Click View Receipt">
+    Open the receipt from the order details page.
+  </Step>
+
+  <Step title="Print Again">
+    Use the print button to reprint the receipt.
+  </Step>
+</Steps>
+
+<Note>
+Reprinting does NOT create a new receipt number - it uses the original receipt.
+</Note>
+
+## Receipt Audit Trail
+
+Receipts maintain a complete audit trail:
+
+```php
+// Track receipt generation
+$receipt = Receipt::create([
+    'order_id' => $order->id,
+    'receipt_number' => Receipt::generateReceiptNumber(),
+    'generated_at' => now(),
+    'generated_by' => auth()->id(),
+]);
+
+// Track email sending
+$receipt->update([
+    'emailed_at' => now(),
+    'emailed_to' => $email,
+]);
+```
+
+This provides:
+- When receipt was generated
+- Who generated it
+- If/when it was emailed
+- Who it was emailed to
+
+## Receipt Storage
+
+Receipt PDFs are stored in the filesystem:
+
+```php
+$pdfPath = "receipts/{$shop->id}/{$receipt->receipt_number}.pdf";
+$receipt->pdf_path = $pdfPath;
+```
+
+Storage organization:
+- Organized by shop ID
+- Named by receipt number
+- Stored in secure storage (not publicly accessible)
+- Can be served via authenticated routes
+
+## Digital Receipts
+
+For eco-friendly operations, offer digital-only receipts:
+
+1. **Email Only** - Send receipt via email, no print
+2. **SMS** - Send receipt link via SMS
+3. **QR Code** - Customer scans QR code to view receipt
+4. **Customer Portal** - Customer accesses receipts in their account
+
+This reduces paper usage and provides customers with easily accessible records.
+
+## VAT/Tax Receipts
+
+For VAT-registered businesses, receipts include:
+
+- VAT registration number
+- Tax breakdown by rate
+- Taxable vs non-taxable items
+- Tax point (date of supply)
+
+Example tax section:
+
+```
+VAT Summary:
+VAT @ 15%:     $15.00
+VAT @ 0%:      $0.00
+Total VAT:     $15.00
+
+VAT Reg: 1234567890
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Always Offer Receipts">
+    Even for small purchases, always offer a receipt for customer records.
+  </Step>
+
+  <Step title="Configure Shop Information">
+    Keep shop address, phone, and other contact info up to date in shop settings.
+  </Step>
+
+  <Step title="Test Printer Regularly">
+    Test thermal printers before shifts to avoid delays during sales.
+  </Step>
+
+  <Step title="Offer Email Receipts">
+    Ask customers if they want email receipts for better record keeping.
+  </Step>
+
+  <Step title="Store PDFs Securely">
+    Ensure receipt PDFs are stored in secure, backed-up locations.
+  </Step>
+
+  <Step title="Use Clear Return Policies">
+    Include return policy on receipts to reduce customer service inquiries.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Receipt Not Printing
+
+1. Check printer power and paper
+2. Verify printer connection (USB/network)
+3. Test print from system settings
+4. Check print queue for stuck jobs
+5. Restart printer and try again
+
+### Email Not Sending
+
+1. Verify customer email address is correct
+2. Check email configuration in settings
+3. Look for email in spam/junk folder
+4. Check email service logs
+5. Verify SMTP credentials
+
+### Receipt PDF Not Generating
+
+1. Check PDF generation service is running
+2. Verify storage permissions
+3. Check available disk space
+4. Review error logs for PDF library errors
+
+## Related Resources
+
+- [Point of Sale](/features/sales/point-of-sale) - Receipts are auto-generated for POS sales
+- [Orders](/features/sales/orders) - View receipts for completed orders
+- [Configuration](/setup/configuration) - Configure receipt branding and layout
